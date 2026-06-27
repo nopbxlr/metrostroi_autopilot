@@ -12,7 +12,8 @@ local TRAIN_SAFE_GAP_U     = 700    -- keep this far behind another train
 local PLATFORM_CLEAR_U     = 500    -- a served platform is "left behind" past this
 local ARRIVE_SPEED         = 2.5    -- km/h, considered stopped for arrival
 local ARRIVE_TOL_M         = 4.0    -- how close the nose must be to the stop point
-local PLATFORM_STOP_OFFSET = 2.5    -- m short of the platform far end to aim the nose
+local PLATFORM_STOP_OFFSET = 0.0    -- aim the nose exactly at the platform far end (precise berth, full use of short platforms)
+local BRAKE_PER_MS2        = 1.7    -- atm of brake per m/s^2 wanted (~4.2 atm = full service ~2.5 m/s^2)
 
 --------------------------------------------------------------------------------
 -- Driver "class"
@@ -93,7 +94,7 @@ function DRIVER:Engage()
     self.profile = AI.MatchProfile(self.head) or AI.MatchProfile(self.wagons[1])
     if self.profile and AI.CVars.powerup:GetInt() == 1 then
         for _, w in ipairs(self.wagons) do
-            self.profile.CarLights(w)
+            self.profile.PowerCar(w)   -- electrics + doors on every car
             if w == self.head then self.profile.ActivateCab(w) else self.profile.DeactivateCab(w) end
         end
     end
@@ -242,84 +243,114 @@ end
 --------------------------------------------------------------------------------
 -- Lookahead: speed limits and stop points
 --------------------------------------------------------------------------------
--- IMPORTANT: we must NOT call the recursive track-scan functions
--- (GetARSJoint / GetNextTrafficLight / IsTrackOccupied) ourselves - on looped
--- networks, or with a not-yet-registered train, they can recurse without end
--- and trigger an uncatchable engine "Lua panic". Instead we read the train's
--- own ARS receiver (ALSCoil), which the game computes safely each tick, and we
--- look at signal ENTITIES directly (no recursion) for hard red-signal stops.
-
--- Scan signal entities ahead that face us (no recursion). Picks the nearest
--- governing signal. If it is red -> returns a stop-curve target. If it is clear,
--- records its ARS code as the permitted block speed (-> self.arsSignalSpeed) so
--- ARSMaxSpeed() can use it as a fallback when the on-board ALS isn't reading.
-function DRIVER:SignalScan(limit)
-    self.arsSignalSpeed = nil
-    if AI.CVars.obey_signals:GetInt() == 0 then self.holdSignal = nil return limit end
-
-    local bestFd, bestSig
-    for _, sig in ipairs(self.signals or {}) do
-        if IsValid(sig) then
-            local p = sig:GetPos()
-            local fd = self:ForwardDist(p)
-            if fd > 0 and self:LateralDist(p) < STATION_CORRIDOR_U
-               and sig:GetForward():Dot(self.travelDir) < -0.25 then   -- faces us
-                if not bestFd or fd < bestFd then bestFd, bestSig = fd, sig end
-            end
-        end
-    end
-    if not bestSig then self.holdSignal = nil return limit end
-
-    if (bestSig.ARSSpeedLimit == 0) or bestSig.Occupied or bestSig.Close or bestSig.KGU then
-        self.holdSignal = true                       -- red / occupied: plan a stop
-        local s_m = math.max(0, (bestFd / AI.U_PER_M) - STOP_BEFORE_SIGNAL_M)
-        return math.min(limit, self:StopSpeed(s_m))
-    end
-    self.holdSignal = nil
-    self.arsSignalSpeed = AI.ARS_SPEED[bestSig.ARSSpeedLimit]   -- its code = block speed
-    return limit
+-- Find the GOVERNING ARS signal for our current track circuit (the one whose
+-- code the train's ARS receiver would read) and cache it + its code. This is
+-- exactly what the stock ALS coil does: Metrostroi.GetARSJoint(), throttled to
+-- ~2 Hz, with a real boolean direction. Safe (the game does this for every train
+-- every second) and gives the true per-section code - the old geometric "nearest
+-- signal facing us" guess kept latching onto one code-6 signal => a constant 60.
+function DRIVER:UpdateARS(pos, dir, now)
+    if now < (self.arsNextScan or 0) then return end
+    self.arsNextScan = now + 0.5
+    self.arsSignal, self.arsSpeed, self.arsCode, self.arsNext = nil, nil, nil, nil
+    if AI.CVars.obey_signals:GetInt() == 0 then return end
+    if not (pos and pos.node1 and type(dir) == "boolean" and Metrostroi.GetARSJoint) then return end
+    local ok, fwd = pcall(Metrostroi.GetARSJoint, pos.node1, pos.x, dir, self.head)
+    if not (ok and IsValid(fwd)) then return end
+    self.arsSignal = fwd
+    self.arsCode   = fwd.ARSSpeedLimit
+    self.arsNext   = fwd.ARSNextSpeedLimit
+    self.arsSpeed  = self:DecodeARS(fwd)
 end
 
--- The ARS-authorised max speed (km/h), or nil if no ARS code is available here.
--- Prefers the train's own ALS receiver; falls back to the governing signal code.
+-- Decode a governing signal to the km/h the cab ARS would show, exactly like the
+-- stock ALS coil: GetARS(8/7/6/4/0) -> 80/70/60/40/stop. This factors in the
+-- NEXT signal's code / the 1-5 vs 2-6 decoder, which the raw ARSSpeedLimit field
+-- does not - reading the raw code is why a 70 section came out as 60.
+function DRIVER:DecodeARS(sig)
+    if not (IsValid(sig) and sig.GetARS) then return nil end
+    local tbl = IsValid(self.head) and self.head.SubwayTrain and self.head.SubwayTrain.ALS
+    local f15 = (not tbl) or (not tbl.TwoToSix)
+    local okc, nocode = pcall(sig.GetARS, sig, 1, self.head)
+    if okc and nocode then return nil end                  -- no valid code here
+    for _, cs in ipairs({ { 8, 80 }, { 7, 70 }, { 6, 60 }, { 4, 40 }, { 0, 0 } }) do
+        local ok2, r = pcall(sig.GetARS, sig, cs[1], f15)
+        if ok2 and r then return cs[2] end
+    end
+    return nil
+end
+
+-- Brake to a stop if the governing signal is red / its block is occupied.
+function DRIVER:SignalStop(limit)
+    self.holdSignal = nil
+    if AI.CVars.obey_signals:GetInt() == 0 then return limit end
+    local sig = self.arsSignal
+    if not IsValid(sig) then return limit end
+    if not ((sig.ARSSpeedLimit == 0) or sig.Occupied or sig.Close or sig.KGU) then return limit end
+    local fd = self:ForwardDist(sig:GetPos())
+    if fd <= 0 then return limit end
+    self.holdSignal = true
+    local s_m = math.max(0, fd / AI.U_PER_M - STOP_BEFORE_SIGNAL_M)
+    return math.min(limit, self:StopSpeed(s_m))
+end
+
+-- The ARS-authorised max speed (km/h) for the current section, or nil when there
+-- is no ARS code here (then the cruise cvar applies). The stop code (0) returns
+-- nil too - SignalStop handles the actual braking distance to the red signal.
 function DRIVER:ARSMaxSpeed()
     if AI.CVars.obey_signals:GetInt() == 0 then return nil end
-    local h = self.head
-    local als = IsValid(h) and (h.ALSCoil or (h.Systems and h.Systems["ALSCoil"]))
-    if als then
-        if     (als.F1 or 0) > 0 then return 80
-        elseif (als.F2 or 0) > 0 then return 70
-        elseif (als.F3 or 0) > 0 then return 60
-        elseif (als.F4 or 0) > 0 then return 40
-        elseif (als.F5 or 0) > 0 then return 20 end  -- restrictive aspect: crawl
-    end
-    return self.arsSignalSpeed                        -- from SignalScan (may be nil)
+    local s = self.arsSpeed
+    if s == nil or s == 0 then return nil end   -- 0 (stop) is handled by SignalStop
+    return s
 end
 
--- Curve speed limit: sample the track a little ahead and limit speed where it bends.
+-- Max comfortable speed (km/h) for the curvature over `base` metres centred on x
+-- along `path`; nil if effectively straight or the sample runs off the path end.
+-- pos.x / node.x are in Metrostroi METRES, so we advance by plain metres.
+local function curveVmaxAt(path, x, base, lat)
+    local gp = Metrostroi.GetTrackPosition
+    if not gp then return nil end
+    local _, d1 = gp(path, x - base * 0.5)
+    local _, d2 = gp(path, x + base * 0.5)
+    if not (isvector(d1) and isvector(d2)) then return nil end
+    d1:Normalize(); d2:Normalize()
+    local turn = math.acos(math.Clamp(d1:Dot(d2), -1, 1))   -- bend across `base` m
+    if turn < 0.02 then return nil end                       -- near-straight: no limit
+    local R = base / turn                                    -- curve radius (m)
+    return math.sqrt(math.max(0.3, lat) * R) * 3.6
+end
+
+-- Curve speed limit that accounts for the WHOLE TRAIN. We sample the curvature at
+-- every car's own track position and take the tightest, so the head clearing a
+-- curve can't let us power up while the rear cars are still in it (which was
+-- nearly throwing them off). Each wagon reports its own path, so this also covers
+-- curves that straddle a track-segment / switch boundary. A nose look-ahead is
+-- added on top so we still slow BEFORE the front reaches a curve.
 function DRIVER:CurveLimit(pos, limit)
     if not (pos and pos.path and pos.x) then return limit end
-    local path, x = pos.path, pos.x
-    local gp = Metrostroi.GetTrackPosition
-    if not gp then return limit end
+    local lat   = AI.CVars.curve_lat:GetFloat()
+    local worst = limit
 
-    -- Sample tangents 8 m and 40 m ahead (in the travel sense). pos.x is in
-    -- Metrostroi METRES (same units as node.x), so advance by plain metres. The
-    -- 32 m baseline smooths out node-to-node kinks so gentle track isn't seen as
-    -- a curve.
+    -- under every car (covers the full train length)
+    for _, w in ipairs(self.wagons) do
+        local tp = Metrostroi.TrainPositions and Metrostroi.TrainPositions[w]
+        local wp = tp and tp[1]
+        if wp and wp.path and wp.x then
+            local v = curveVmaxAt(wp.path, wp.x, 16, lat)
+            if v then worst = math.min(worst, math.max(25, v)) end
+        end
+    end
+
+    -- look-ahead beyond the nose (on the head's path)
     local sgn = (isvector(pos.node1 and pos.node1.dir)
                  and self.travelDir:Dot(pos.node1.dir) < 0) and -1 or 1
-    local _, d1 = gp(path, x + sgn * 8)
-    local _, d2 = gp(path, x + sgn * 40)
-    if not (isvector(d1) and isvector(d2)) then return limit end
-    d1:Normalize(); d2:Normalize()
-    local dot = math.Clamp(d1:Dot(d2), -1, 1)
-    local turn = math.acos(dot)                     -- radians over ~32 m of track
-    if turn < 0.04 then return limit end            -- ignore near-straight track
-    -- R = arclen / angle; cap lateral acceleration (tunable; higher = faster).
-    local R = 32 / turn
-    local vmax = math.sqrt(math.max(0.3, AI.CVars.curve_lat:GetFloat()) * R) * 3.6
-    return math.min(limit, math.max(25, vmax))      -- never crawl below 25 for a curve
+    local noseM = AI.HALF_CAR / AI.U_PER_M
+    for _, ahead in ipairs({ 10, 24, 40 }) do
+        local v = curveVmaxAt(pos.path, pos.x + sgn * (noseM + ahead), 24, lat)
+        if v then worst = math.min(worst, math.max(25, v)) end
+    end
+
+    return worst
 end
 
 -- Nearest other train ahead on our track (collision avoidance / unsignalled maps).
@@ -513,48 +544,62 @@ function DRIVER:Think(now)
 
     local tp  = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
     local pos = tp and tp[1]
+    local dir = Metrostroi.TrainDirections and Metrostroi.TrainDirections[head]
+    self:UpdateARS(pos, dir, now)                      -- refresh the governing ARS signal
 
-    -- Build the target speed. The ARS code is the AUTHORISED max speed for the
-    -- block; the cruise cvar is only a fallback (no code) and an absolute ceiling.
-    local cruise = math.max(0, AI.CVars.cruise:GetFloat())
-    local stopTarget = self:SignalScan(cruise)        -- red-signal stop + sets arsSignalSpeed
-    local target = math.min(cruise, self:ARSMaxSpeed() or cruise)
-    target = self:CurveLimit(pos, target)
-    target = math.min(target, stopTarget)
-    target = self:TrainLimit(target, speed)
+    -- Build the target speed from every limit. The ARS code IS the AUTHORISED max
+    -- wherever the track sends one; cruise is ONLY the fallback for un-coded track
+    -- - it must NEVER cap an ARS block (a cruise of 60 was dragging ARS-70 sections
+    -- down to 60: that was the "60 instead of 70" all along). Each limit is computed
+    -- standalone so the debug can show which one is actually binding.
+    local cruise    = math.max(0, AI.CVars.cruise:GetFloat())
+    local arsMax    = self:ARSMaxSpeed()
+    local base      = arsMax or cruise
+    local curveLim  = self:CurveLimit(pos, 9999)
+    local signalLim = self:SignalStop(9999)
+    local trainLim  = self:TrainLimit(9999, speed)
+    local term      = self:TerminusDistance(pos)
+    local termLim   = term and self:StopSpeed(math.max(0, term - 3)) or 9999
+    local target = math.min(base, curveLim, signalLim, trainLim, termLim)
+    self.dbg = { cruise = cruise, ars = arsMax, curve = curveLim, signal = signalLim,
+                 train = trainLim, term = termLim, target = target }
 
-    -- Anticipatory end-of-track: start braking for a buffer well before we reach
-    -- it (follows the curve; won't false-fire at junctions/loops).
-    local term = self:TerminusDistance(pos)
-    if term then target = math.min(target, self:StopSpeed(math.max(0, term - 3))) end
-
-    -- Platform stop - precise. Aim a bit short of the far end so the train ends
-    -- up fully inside the platform and never rolls past it (which would leave the
-    -- doors off the platform). Crawl the last stretch and slam the brakes if we
-    -- ever pass the aim point still moving.
+    -- Platform stop - DISTANCE-BASED braking. Each tick we work out the
+    -- deceleration needed to bring the nose to rest on the aim point (a couple of
+    -- metres short of the far end) and command exactly that brake. Re-solving it
+    -- live makes it self-correcting: the train settles onto a smooth braking curve
+    -- and stops on the mark, with no speed-error lag riding over it, no last-moment
+    -- slam, and no overrun (the old proportional law caused all three).
     local status = "DRIVE"
     local pf = self:NextPlatform()
     if pf then
-        local farFd = self:ForwardDist(self:PlatformStopPoint(pf)) / AI.U_PER_M  -- m to far end
-        local aim   = farFd - PLATFORM_STOP_OFFSET
+        local farFd = self:ForwardDist(self:PlatformStopPoint(pf)) / AI.U_PER_M  -- m, nose -> far end
+        local aim   = farFd - PLATFORM_STOP_OFFSET                               -- m, nose -> stop point
+        local sdec  = math.max(0.2, AI.CVars.station_decel:GetFloat())
         status = "APPROACH " .. (pf.StationIndex or "?")
-        if aim <= 0.3 then
-            target = 0
-            if speed > ARRIVE_SPEED then                  -- overrunning: emergency brake
-                self:ApplyDrive(0, 6)
-                if IsValid(self.lead) then
-                    self.lead:SetNW2String("AIStatus", "STOPPING " .. (pf.StationIndex or "?"))
-                end
-                return
-            end
-        else
-            target = math.min(target, self:StopSpeed(aim))
-            if aim < 12 then target = math.min(target, 9) end   -- slow, precise final approach
-        end
-        if speed <= ARRIVE_SPEED and farFd <= 4 then
-            self:BeginStationStop(now, pf)
+        self.dbg.platform = self:StopSpeed(math.max(0, aim))
+
+        if speed <= ARRIVE_SPEED and aim <= 1.5 then
+            self:BeginStationStop(now, pf)                  -- berthed on the mark
             return
         end
+        if aim <= 0.4 then
+            -- on/over the mark and still rolling: ease it to a halt (gentle, it's slow)
+            self:ApplyDrive(0, speed > ARRIVE_SPEED and 4 or AI.HOLD_BRAKE)
+            if IsValid(self.lead) then
+                self.lead:SetNW2String("AIStatus", "STOPPING " .. (pf.StationIndex or "?"))
+            end
+            return
+        end
+        local vms       = speed / 3.6
+        local needDecel = (aim > 0.05) and (vms * vms) / (2 * aim) or 99
+        if needDecel >= sdec then
+            -- close enough that we must brake: command the deceleration we need
+            self:ApplyDrive(0, math.Clamp(needDecel * BRAKE_PER_MS2, 0.4, 5))
+            if IsValid(self.lead) then self.lead:SetNW2String("AIStatus", status) end
+            return
+        end
+        target = math.min(target, self:StopSpeed(aim))      -- still far: just cap cruise speed
     end
 
     -- End of track: once we've crept up to the buffer, stop & reverse. The
@@ -590,9 +635,24 @@ function DRIVER:Think(now)
     self:Drive(target, speed, dt)
 
     if IsValid(self.lead) then
-        self.lead:SetNW2String("AIStatus",
-            string.format("%s  %d/%d", status, math.Round(speed), math.Round(target)))
+        local s = string.format("%s  %d/%d", status, math.Round(speed), math.Round(target))
+        if AI.CVars.debug:GetInt() == 1 then
+            s = s .. string.format("  ARS[code %s, next %s]=%s  sig:%s",
+                tostring(self.arsCode), tostring(self.arsNext), tostring(self.arsSpeed),
+                IsValid(self.arsSignal) and tostring(self.arsSignal.Name) or "-")
+        end
+        self.lead:SetNW2String("AIStatus", s)
     end
+end
+
+-- Smoothed longitudinal acceleration (m/s^2) from the lead bogey, used to keep
+-- tractive effort comfortable instead of slamming to full power.
+function DRIVER:Accel()
+    local h = self.head
+    local b = IsValid(h) and ((IsValid(h.FrontBogey) and h.FrontBogey) or h.RearBogey)
+    local a = (IsValid(b) and b.Acceleration) or 0
+    self.accelSmooth = (self.accelSmooth or 0) * 0.6 + a * 0.4
+    return self.accelSmooth
 end
 
 -- Speed controller: convert (target,current) into power / brake.
@@ -605,8 +665,14 @@ function DRIVER:Drive(target, speed, dt)
     else
         local err = target - speed
         if err > 0.6 then
-            local want = math.Clamp(err / 6, 0.08, 1)   -- ease in near the target
-            self.power = math.Clamp((self.power or 0) + dt * 1.5, 0, want)
+            -- Close the loop on ACCELERATION: trim power to pull away at the
+            -- comfortable rate set by metrostroi_ai_accel (m/s^2) rather than
+            -- dumping full tractive effort. Ease off fast if we're over the target,
+            -- build up gently if under; `want` still eases us in near the speed.
+            local aTgt = math.max(0.2, AI.CVars.accel:GetFloat())
+            local want = math.Clamp(err / 6, 0.08, 1)
+            local adj  = (self:Accel() > aTgt) and (-dt * 1.5) or (dt * 0.6)
+            self.power = math.Clamp((self.power or 0) + adj, 0, want)
             power, brake = self.power, 0
         elseif err < -0.6 then
             self.power = 0

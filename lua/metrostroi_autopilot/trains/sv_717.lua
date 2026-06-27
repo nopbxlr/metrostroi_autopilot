@@ -26,10 +26,20 @@ end
 --------------------------------------------------------------------------------
 -- Lights / cabin
 --------------------------------------------------------------------------------
--- Saloon (passenger compartment) lights - run on EVERY car so the whole train
--- has lit windows, regardless of which end is driving.
-function PROFILE.CarLights(w)
-    timer.Simple(1.0, function() S(w, "PLights", "Set", 1) end)
+-- Electrics, saloon lights AND door-circuit power - on EVERY car. A 717/714
+-- consist needs each car's electrics up or that car's doors won't open. (This is
+-- what broke when only the head cab was being powered.) NOTE: deliberately does
+-- NOT touch headlights (L_4), the driver brake valve or the disconnect valves -
+-- those stay cab-only so we don't relight both ends or bleed the air line.
+function PROFILE.PowerCar(w)
+    if not IsValid(w) then return end
+    timer.Simple(0.5, function()
+        for _, s in ipairs({ "VMK", "V1", "KU1", "VUS" }) do S(w, s, "Set", 1) end
+    end)
+    timer.Simple(1.0, function()
+        for _, s in ipairs({ "V2", "L_1", "L_3", "R_UNch", "R_ZS", "R_G", "R_Radio",
+                             "PLights", "VU14", "KU16", "KU2" }) do S(w, s, "Set", 1) end
+    end)
 end
 
 -- Full active-cab autostart - HEAD CAB ONLY. Activating both cabs lit two sets
@@ -49,13 +59,9 @@ function PROFILE.ActivateCab(w)
     -- ARS off -> switch УАВА on so the trackside autostop doesn't trip & vent air.
     if AI.CVars.ars_onboard:GetInt() ~= 1 then S(w, "UAVA", "Set", 1) end
 
-    timer.Simple(0.5, function()
-        for _, s in ipairs({ "VMK", "V1", "KU1", "VUS" }) do S(w, s, "Set", 1) end
-    end)
     timer.Simple(1.0, function()
-        -- cab/panel lights + HEADLIGHTS (L_4) + control relays
-        for _, s in ipairs({ "V2", "L_1", "L_3", "L_4", "R_UNch", "R_ZS", "R_G", "R_Radio",
-                             "GLights", "VU14", "KU16", "KU2" }) do S(w, s, "Set", 1) end
+        S(w, "L_4", "Set", 1)        -- headlights (leading/active end only)
+        S(w, "GLights", "Set", 1)    -- marker lights
     end)
     timer.Simple(2.0, function()
         if AI.CVars.ars_onboard:GetInt() == 1 then

@@ -26,13 +26,14 @@ AI.Loaded    = false
 --------------------------------------------------------------------------------
 AI.CVars = {
     enabled         = CreateConVar("metrostroi_ai_enabled",        "1", FCVAR_ARCHIVE, "Master enable for the Metrostroi Autopilot control loop"),
-    cruise          = CreateConVar("metrostroi_ai_cruise_speed",  "80", FCVAR_ARCHIVE, "Fallback/ceiling speed in km/h. ARS code is the real max where present; this is used only where the track sends no ARS code, and as an absolute cap."),
+    cruise          = CreateConVar("metrostroi_ai_cruise_speed",  "80", FCVAR_ARCHIVE, "Fallback speed in km/h for track that sends NO ARS code. Where the track does send an ARS code, that code is the max and this value is ignored (it does NOT cap ARS)."),
     dwell           = CreateConVar("metrostroi_ai_dwell",         "18", FCVAR_ARCHIVE, "How long (seconds) an AI train waits at a platform"),
     motorforce      = CreateConVar("metrostroi_ai_motorforce", "40000", FCVAR_ARCHIVE, "Per-bogey traction force"),
     brakeforce      = CreateConVar("metrostroi_ai_brakeforce", "50000", FCVAR_ARCHIVE, "Per-bogey pneumatic brake force"),
     accel           = CreateConVar("metrostroi_ai_accel",       "0.85", FCVAR_ARCHIVE, "Target acceleration m/s^2 (drives the power law)"),
-    decel           = CreateConVar("metrostroi_ai_decel",        "0.7", FCVAR_ARCHIVE, "Planned service deceleration m/s^2 (drives braking curves)"),
-    curve_lat       = CreateConVar("metrostroi_ai_curve_lat",    "1.8", FCVAR_ARCHIVE, "Allowed lateral acceleration in curves m/s^2 (higher = faster through curves)"),
+    decel           = CreateConVar("metrostroi_ai_decel",        "1.1", FCVAR_ARCHIVE, "Planned service deceleration m/s^2. Higher = brakes later/harder, so the train reaches line speed between closely-spaced stations instead of crawling toward the next one. (0.7 braked ~350 m out from 80 km/h.)"),
+    station_decel   = CreateConVar("metrostroi_ai_station_decel", "0.9", FCVAR_ARCHIVE, "Comfortable deceleration m/s^2 for the precise platform stop (distance-based braking). Lower = gentler/earlier braking into the platform; higher = brakes later/firmer."),
+    curve_lat       = CreateConVar("metrostroi_ai_curve_lat",    "2.5", FCVAR_ARCHIVE, "Allowed lateral acceleration in curves m/s^2 (higher = faster through curves)"),
     ars_onboard     = CreateConVar("metrostroi_ai_ars",           "0", FCVAR_ARCHIVE, "Power up the train's own ARS at autostart. 0 avoids the unmanned vigilance buzzer (speed limits still come from the signals)."),
     station_stops   = CreateConVar("metrostroi_ai_station_stops",  "1", FCVAR_ARCHIVE, "1 = stop & dwell at platforms, 0 = run through"),
     terminus_rev    = CreateConVar("metrostroi_ai_terminus_reverse","1",FCVAR_ARCHIVE, "1 = reverse and continue at end of track, 0 = just hold"),
