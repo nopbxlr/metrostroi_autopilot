@@ -1,0 +1,10 @@
+# OS / editor junk
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~
+
+# packed addon output / disabled files
+*.gma
+*.disabled

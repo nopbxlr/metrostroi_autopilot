@@ -1,0 +1,6 @@
+{
+    "title": "Metrostroi Autopilot (AI Trains)",
+    "type": "servercontent",
+    "tags": [ "fun", "roleplay" ],
+    "ignore": [ "*.md", "*.py" ]
+}
