@@ -40,6 +40,7 @@ AI.CVars = {
     powerup         = CreateConVar("metrostroi_ai_powerup",        "1", FCVAR_ARCHIVE, "Run the cabin autostart on engage (lights/cabin/ARS/air alive). 81-717/714 family."),
     open_doors      = CreateConVar("metrostroi_ai_open_doors",     "1", FCVAR_ARCHIVE, "Open doors at stations (needs powerup so the air/door circuit is live)"),
     obey_signals    = CreateConVar("metrostroi_ai_obey_signals",   "1", FCVAR_ARCHIVE, "1 = stop at red signals / occupied blocks"),
+    open_routes     = CreateConVar("metrostroi_ai_open_routes",     "1", FCVAR_ARCHIVE, "When held at a red ROUTE signal (e.g. a terminus departure), request its route like a dispatcher. The interlocking still won't clear it into an occupied block, so it's collision-safe."),
     avoid_trains    = CreateConVar("metrostroi_ai_avoid_trains",   "1", FCVAR_ARCHIVE, "1 = brake for trains ahead even without signalling"),
     rate            = CreateConVar("metrostroi_ai_rate",          "15", FCVAR_ARCHIVE, "Control loop frequency in Hz"),
     debug           = CreateConVar("metrostroi_ai_debug",          "0", FCVAR_ARCHIVE, "Show on-screen debug info for AI trains"),

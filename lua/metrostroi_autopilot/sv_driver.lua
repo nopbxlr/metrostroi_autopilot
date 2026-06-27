@@ -14,6 +14,11 @@ local ARRIVE_SPEED         = 2.5    -- km/h, considered stopped for arrival
 local ARRIVE_TOL_M         = 4.0    -- how close the nose must be to the stop point
 local PLATFORM_STOP_OFFSET = 0.0    -- aim the nose exactly at the platform far end (precise berth, full use of short platforms)
 local BRAKE_PER_MS2        = 1.7    -- atm of brake per m/s^2 wanted (~4.2 atm = full service ~2.5 m/s^2)
+local TERMINUS_BUFFER      = 5.0    -- m to stop short of an end-of-track buffer
+local TURNBACK_SCAN_M      = 400    -- m ahead to look for a turn-back crossover switch (covers approach-side crossovers, not just tail-track ones)
+local TURNBACK_NEAR_U      = 260    -- lateral units: a switch this close is on OUR track (the entry switch)
+local TURNBACK_FAR_U       = 600    -- ... this far out is the other track (the scissors/crossover diagonal partner)
+local TURNBACK_DIAG_M      = 60     -- max longitudinal span of a crossover diagonal (entry <-> exit switch)
 
 --------------------------------------------------------------------------------
 -- Driver "class"
@@ -183,6 +188,16 @@ function DRIVER:GetSpeed()
     return h.Speed or 0
 end
 
+-- Publish the AI status string to EVERY car (not just the lead) so the floating
+-- label and the detail HUD are readable from whichever car you're riding in.
+-- NW2String is delta-compressed, so re-setting the same value costs no traffic.
+function DRIVER:SetStatus(s)
+    self.status = s
+    for _, w in ipairs(self.wagons or {}) do
+        if IsValid(w) then w:SetNW2String("AIStatus", s) end
+    end
+end
+
 -- Signed distance (source units) from the nose to a world point, along travel.
 function DRIVER:ForwardDist(worldpos)
     return (worldpos - self.headFront):Dot(self.travelDir)
@@ -294,6 +309,37 @@ function DRIVER:SignalStop(limit)
     return math.min(limit, self:StopSpeed(s_m))
 end
 
+-- A dispatcher would grant the route at a red ROUTE signal we're held at (e.g. a
+-- terminus departure). OpenRoute opens it and lines its switches - but the
+-- interlocking still won't show green into an occupied block, so this is
+-- collision-safe: an occupancy red just stays red and we keep waiting. (It also
+-- lines the turn-back crossover the mapper's way when the route owns those points.)
+function DRIVER:TryOpenSignal(now, speed)
+    if AI.CVars.obey_signals:GetInt() == 0 or AI.CVars.open_routes:GetInt() ~= 1 then return end
+    if not self.holdSignal or speed > 8 then return end          -- only when actually held & crawling
+    if (self.nextSigOpen or 0) > now then return end
+    self.nextSigOpen = now + 2
+    local sig = self.arsSignal
+    if not (IsValid(sig) and istable(sig.Routes)) then return end
+    if sig.Close then sig.Close = false end                      -- a manually-closed signal
+    -- grant ONE route: the one the signal already favours if it's openable, else
+    -- the first manual/emergency route (a plain auto block signal has neither and
+    -- is left alone - it's red for occupancy, which we must respect)
+    local k = (sig.Route and sig.Routes[sig.Route]
+               and (sig.Routes[sig.Route].Manual or sig.Routes[sig.Route].Emer)) and sig.Route or nil
+    if not k then
+        for i, r in ipairs(sig.Routes) do
+            if r.Manual or r.Emer then k = i break end
+        end
+    end
+    if k then
+        pcall(sig.OpenRoute, sig, k)
+        if AI.CVars.debug:GetInt() == 1 then
+            AI.Msg("signal '", tostring(sig.Name), "' held -> requested route ", k)
+        end
+    end
+end
+
 -- The ARS-authorised max speed (km/h) for the current section, or nil when there
 -- is no ARS code here (then the cruise cvar applies). The stop code (0) returns
 -- nil too - SignalStop handles the actual braking distance to the red signal.
@@ -395,14 +441,21 @@ end
 -- passed the middle, so the train accelerated away half a platform short.)
 function DRIVER:NextPlatform()
     if AI.CVars.station_stops:GetInt() == 0 then return nil end
+    local served    = self.servedPlatform
+    local servedIdx = IsValid(served) and served.StationIndex
     local best, bestFd
     for _, pf in ipairs(self.platforms or {}) do
         if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
             local center = (pf.PlatformStart + pf.PlatformEnd) * 0.5
             local fd = self:ForwardDist(self:PlatformStopPoint(pf))   -- distance to far end
-            if pf == self.servedPlatform then
-                -- ignore until we have clearly left it behind
-                if fd < -PLATFORM_CLEAR_U then self.servedPlatform = nil end
+            -- A station has TWO platform faces (separate entities, same StationIndex).
+            -- Treat BOTH faces of the station we just served as served, or we re-
+            -- acquire the opposite face and stop again - at a terminus that left us
+            -- ping-ponging between the two faces and never reversing.
+            local sameStation = (pf == served) or (servedIdx and pf.StationIndex == servedIdx)
+            if sameStation then
+                -- clear once OUR served face is clearly behind us
+                if pf == served and fd < -PLATFORM_CLEAR_U then self.servedPlatform = nil end
             elseif fd > -AI.HALF_CAR and self:LateralDist(center) < STATION_CORRIDOR_U then
                 if not bestFd or fd < bestFd then best, bestFd = pf, fd end
             end
@@ -426,7 +479,7 @@ function DRIVER:BeginStationStop(now, pf)
     if AI.CVars.open_doors:GetInt() == 1 then self:OpenDoors(pf) end
     hook.Run("MetrostroiAI.StationStop", self, pf)
     if IsValid(self.lead) then
-        self.lead:SetNW2String("AIStatus", "STATION " .. (pf.StationIndex or "?"))
+        self:SetStatus("STATION " .. (pf.StationIndex or "?"))
     end
 end
 
@@ -435,9 +488,99 @@ function DRIVER:BeginReverse(now)
     self.servedPlatform = nil
     self.power = 0
     self.state = "REVERSE_HOLD"
-    self.holdUntil = now + 4
+    self.holdUntil = now + 5
     self:ApplyDrive(0, AI.HOLD_BRAKE)
-    if IsValid(self.lead) then self.lead:SetNW2String("AIStatus", "TERMINUS") end
+    -- Throw the crossover so we depart on the OPPOSITE (correct) track. If we can't
+    -- find one we just reverse on the same track - the safe fallback for stubs /
+    -- single-track / loops with no crossover.
+    self.turnbackSwitches = self:FindTurnbackSwitches()
+    if self.turnbackSwitches and #self.turnbackSwitches > 0 then
+        local ids = {}
+        for _, sw in ipairs(self.turnbackSwitches) do
+            pcall(sw.SendSignal, sw, "alt", nil)
+            ids[#ids + 1] = sw:GetNW2String("ID", "?")
+        end
+        if AI.CVars.debug:GetInt() == 1 then
+            AI.Msg("turnback: throwing crossover ", table.concat(ids, "+"))
+        end
+    end
+    self:SetStatus("TERMINUS")
+end
+
+-- Find the crossover switch(es) to throw so the reversing train departs on the
+-- opposite track. Scan gmod_track_switch ahead (in the already-flipped travel
+-- sense). The ENTRY is the nearest switch on our track - we must divert there
+-- first. For a scissors / double crossover we also need its diagonal PARTNER on
+-- the far track (a switch at a different longitudinal position, ~track-gap out),
+-- or the diagonal won't complete. Returns a list (entry [+ partner]); empty ->
+-- same-track reverse (safe fallback for stubs / single track / loops).
+function DRIVER:FindTurnbackSwitches()
+    if not (self.travelDir and self.wagons) then return {} end
+    -- reference = the foremost point of the train in the NEW travel direction
+    local ref, best = nil, -math.huge
+    for _, w in ipairs(self.wagons) do
+        if IsValid(w) then
+            local d = w:GetPos():Dot(self.travelDir)
+            if d > best then best, ref = d, w:GetPos() end
+        end
+    end
+    if not ref then return {} end
+
+    local list, maxFd = {}, TURNBACK_SCAN_M * AI.U_PER_M
+    for _, sw in ipairs(ents.FindByClass("gmod_track_switch")) do
+        if IsValid(sw) then
+            local rel = sw:GetPos() - ref
+            local fd  = rel:Dot(self.travelDir)
+            local lat = (rel - self.travelDir * fd):Length()
+            if fd > 0 and fd < maxFd then
+                list[#list + 1] = { sw = sw, fd = fd, lat = lat }
+            end
+        end
+    end
+    if #list == 0 then return {} end
+    table.sort(list, function(a, b) return a.fd < b.fd end)
+
+    -- entry: nearest switch on our own track
+    local entry
+    for _, s in ipairs(list) do
+        if s.lat < TURNBACK_NEAR_U then entry = s break end
+    end
+    if not entry then return {} end
+
+    local out = { entry.sw }
+    -- partner: the diagonal's far-track end, at a *different* longitudinal spot
+    local partner
+    for _, s in ipairs(list) do
+        local dl = math.abs(s.fd - entry.fd) / AI.U_PER_M
+        if s.lat >= TURNBACK_NEAR_U and s.lat < TURNBACK_FAR_U and dl > 8 and dl < TURNBACK_DIAG_M then
+            if not partner or math.abs(s.fd - entry.fd) < math.abs(partner.fd - entry.fd) then partner = s end
+        end
+    end
+    if partner then out[#out + 1] = partner.sw end
+    return out
+end
+
+-- Hold the turn-back crossover thrown until we've driven past it. Switches auto-
+-- revert to "main" after ~20 s and refuse to move under an occupied segment, so
+-- we re-assert every tick (which also resets their revert timer).
+function DRIVER:MaintainTurnback()
+    local list = self.turnbackSwitches
+    if not (list and #list > 0) then self.turnbackSwitches = nil return end
+    -- Re-assert each thrown switch until the whole train (tail included) is past
+    -- it, so its rails can't snap back under us mid-crossing (the switch's own
+    -- occupancy-inhibit also guards this). Release the set once all are behind us.
+    local tailAlong = math.huge
+    for _, w in ipairs(self.wagons) do
+        if IsValid(w) then tailAlong = math.min(tailAlong, w:GetPos():Dot(self.travelDir)) end
+    end
+    local anyAhead = false
+    for _, sw in ipairs(list) do
+        if IsValid(sw) and (sw:GetPos():Dot(self.travelDir) - tailAlong) >= -AI.HALF_CAR then
+            pcall(sw.SendSignal, sw, "alt", nil)
+            anyAhead = true
+        end
+    end
+    if not anyAhead then self.turnbackSwitches = nil end
 end
 
 --------------------------------------------------------------------------------
@@ -454,19 +597,21 @@ end
 
 function DRIVER:OpenDoors(pf)
     if not self.profile then return end
+    local h = self.head
+    if not IsValid(h) then return end
     local center = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+    -- Decide the platform side ONCE, in the head's frame, and command that SAME
+    -- side on every car. The door commands feed train-wide wires 31 (left) / 32
+    -- (right); a per-car side meant cars facing opposite ways drove BOTH wires hot,
+    -- and VDOL+VDOP energised together is the CLOSE command - so the doors locked
+    -- shut and never opened. One side -> one wire -> they open.
+    local hRight = h:GetForward():Cross(Vector(0, 0, 1))
+    local side = ((center - h:GetPos()):Dot(hRight) > 0) and "right" or "left"
     for _, w in ipairs(self.wagons) do
-        if IsValid(w) then
-            -- per-wagon side, so a reversed trailer still opens platform-side
-            local wRight = w:GetForward():Cross(Vector(0, 0, 1))
-            local side = ((center - w:GetPos()):Dot(wRight) > 0) and "right" or "left"
-            self.profile.OpenDoor(w, side)
-        end
+        if IsValid(w) then self.profile.OpenDoor(w, side) end
     end
     self.doorsOpen = true
-    if IsValid(self.lead) then
-        self.lead:SetNW2String("AIStatus", "DOORS " .. string.upper(self:PlatformSide(pf)))
-    end
+    self:SetStatus("DOORS " .. string.upper(side))
 end
 
 function DRIVER:CloseDoors()
@@ -529,6 +674,7 @@ function DRIVER:Think(now)
     if not IsValid(head) then return end
     self:UpdateReverser()                  -- keep reverser matched to travel direction
     self:SuppressSafetyVent()              -- stop the autostop bleeding the brake line
+    self:MaintainTurnback()                -- hold the turn-back crossover until we're past it
     local speed = self:GetSpeed()          -- km/h (absolute, from the bogeys)
 
     -- Hold states (dwelling at a station / pausing to reverse)
@@ -563,6 +709,7 @@ function DRIVER:Think(now)
     local target = math.min(base, curveLim, signalLim, trainLim, termLim)
     self.dbg = { cruise = cruise, ars = arsMax, curve = curveLim, signal = signalLim,
                  train = trainLim, term = termLim, target = target }
+    self:TryOpenSignal(now, speed)             -- request a route if held at a red route signal
 
     -- Platform stop - DISTANCE-BASED braking. Each tick we work out the
     -- deceleration needed to bring the nose to rest on the aim point (a couple of
@@ -587,7 +734,7 @@ function DRIVER:Think(now)
             -- on/over the mark and still rolling: ease it to a halt (gentle, it's slow)
             self:ApplyDrive(0, speed > ARRIVE_SPEED and 4 or AI.HOLD_BRAKE)
             if IsValid(self.lead) then
-                self.lead:SetNW2String("AIStatus", "STOPPING " .. (pf.StationIndex or "?"))
+                self:SetStatus("STOPPING " .. (pf.StationIndex or "?"))
             end
             return
         end
@@ -596,21 +743,37 @@ function DRIVER:Think(now)
         if needDecel >= sdec then
             -- close enough that we must brake: command the deceleration we need
             self:ApplyDrive(0, math.Clamp(needDecel * BRAKE_PER_MS2, 0.4, 5))
-            if IsValid(self.lead) then self.lead:SetNW2String("AIStatus", status) end
+            self:SetStatus(status)
             return
         end
         target = math.min(target, self:StopSpeed(aim))      -- still far: just cap cruise speed
     end
 
-    -- End of track: once we've crept up to the buffer, stop & reverse. The
-    -- anticipatory brake above has already slowed us, so this just latches it.
+    -- End of track: pull into the tail track and stop precisely short of the
+    -- buffer (same distance-based feedforward as the platform stop, so we never
+    -- nose into the wall), then turn the train back.
     if term then
         status = "TERMINUS"
-        if term <= 5 and speed <= ARRIVE_SPEED then
+        local aim  = term - TERMINUS_BUFFER
+        local sdec = math.max(0.2, AI.CVars.station_decel:GetFloat())
+        if speed <= ARRIVE_SPEED and aim <= 1.2 then
             if AI.CVars.terminus_rev:GetInt() == 1 then self:BeginReverse(now)
             else self:ApplyDrive(0, AI.HOLD_BRAKE) end
             return
         end
+        if aim <= 0.4 then
+            self:ApplyDrive(0, speed > ARRIVE_SPEED and 4 or AI.HOLD_BRAKE)
+            self:SetStatus("TERMINUS")
+            return
+        end
+        local vms  = speed / 3.6
+        local need = (aim > 0.05) and (vms * vms) / (2 * aim) or 99
+        if need >= sdec then
+            self:ApplyDrive(0, math.Clamp(need * BRAKE_PER_MS2, 0.4, 5))
+            self:SetStatus("TERMINUS")
+            return
+        end
+        target = math.min(target, self:StopSpeed(aim))
     end
 
     -- Backstop (off-network maps / missed buffers): no progress while asking for
@@ -634,15 +797,13 @@ function DRIVER:Think(now)
     -- Drive toward the target speed
     self:Drive(target, speed, dt)
 
-    if IsValid(self.lead) then
-        local s = string.format("%s  %d/%d", status, math.Round(speed), math.Round(target))
-        if AI.CVars.debug:GetInt() == 1 then
-            s = s .. string.format("  ARS[code %s, next %s]=%s  sig:%s",
-                tostring(self.arsCode), tostring(self.arsNext), tostring(self.arsSpeed),
-                IsValid(self.arsSignal) and tostring(self.arsSignal.Name) or "-")
-        end
-        self.lead:SetNW2String("AIStatus", s)
+    local s = string.format("%s  %d/%d", status, math.Round(speed), math.Round(target))
+    if AI.CVars.debug:GetInt() == 1 then
+        s = s .. string.format("  ARS[code %s, next %s]=%s  sig:%s",
+            tostring(self.arsCode), tostring(self.arsNext), tostring(self.arsSpeed),
+            IsValid(self.arsSignal) and tostring(self.arsSignal.Name) or "-")
     end
+    self:SetStatus(s)
 end
 
 -- Smoothed longitudinal acceleration (m/s^2) from the lead bogey, used to keep

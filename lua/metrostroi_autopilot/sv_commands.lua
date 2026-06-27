@@ -31,6 +31,28 @@ local function resolveTrain(ply)
     return nil
 end
 
+-- Resolve the AI driver for the train a player aims at / rides / stands nearest.
+local function resolveDriver(ply)
+    local t = resolveTrain(ply)
+    if IsValid(t) and t.GetNW2Entity then
+        local p = t:GetNW2Entity("TrainEntity"); if IsValid(p) then t = p end
+    end
+    for lead, d in pairs(AI.Drivers) do
+        if lead == t then return d end
+        for _, w in ipairs(d.wagons or {}) do if w == t then return d end end
+    end
+    if IsValid(ply) then
+        local drv, bd
+        for _, d in pairs(AI.Drivers) do
+            if IsValid(d.head) then
+                local dd = d.head:GetPos():DistToSqr(ply:GetPos())
+                if not bd or dd < bd then bd, drv = dd, d end
+            end
+        end
+        return drv
+    end
+end
+
 --------------------------------------------------------------------------------
 -- Commands
 --------------------------------------------------------------------------------
@@ -266,9 +288,74 @@ function AI.CmdDoorDebug(ply)
     end
 end
 
+-- Terminus / turn-back diagnostic: distance to the buffer ahead, which crossover
+-- switch the turn-back would throw, and the switches near the train (id, forward
+-- dist in m, lateral in units, current alt state) so we can verify the pick.
+function AI.CmdTermDebug(ply)
+    local drv = resolveDriver(ply)
+    if not drv then return tell(ply, "no AI train found - aim at one or stand near it.") end
+    local function line(s)
+        if IsValid(ply) then ply:PrintMessage(HUD_PRINTCONSOLE, "[AI TERM] " .. s .. "\n") end
+        tell(ply, s)
+    end
+    local head = drv.head
+    if not IsValid(head) then return line("driver has no head wagon") end
+    local tp  = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
+    local pos = tp and tp[1]
+    local term = pos and drv:TerminusDistance(pos)
+    local thrown = "-"
+    if drv.turnbackSwitches and #drv.turnbackSwitches > 0 then
+        local ids = {}
+        for _, sw in ipairs(drv.turnbackSwitches) do
+            if IsValid(sw) then ids[#ids + 1] = sw:GetNW2String("ID", "?") end
+        end
+        thrown = table.concat(ids, "+")
+    end
+    line(string.format("state=%s  term=%s  turnback=%s",
+        tostring(drv.state),
+        term and (string.format("%.0f m to buffer", term)) or "none (track continues / loop)",
+        thrown))
+    -- What platform (if any) the driver is currently locked onto - the prime
+    -- suspect for getting stuck at a terminus is the OPPOSITE-track face being
+    -- re-acquired (small farFd, lateral ~= track gap) so the platform block keeps
+    -- returning before the terminus reverse can run.
+    local pf = drv:NextPlatform()
+    if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
+        local farFd  = drv:ForwardDist(drv:PlatformStopPoint(pf)) / AI.U_PER_M
+        local center = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+        line(string.format("nextPlatform: station %s  farFd=%+.0fm  lateral=%.0fu",
+            tostring(pf.StationIndex or "?"), farFd, drv:LateralDist(center)))
+    else
+        line("nextPlatform: none")
+    end
+    line(string.format("servedPlatform=%s  doorsOpen=%s",
+        IsValid(drv.servedPlatform) and tostring(drv.servedPlatform.StationIndex or "?") or "-",
+        tostring(drv.doorsOpen)))
+    -- Scan BOTH ways along travel: +fwd = toward the buffer ahead, -fwd = behind us
+    -- toward the line (where an approach-side crossover lives).
+    local ref = head:GetPos()
+    local dir = drv.travelDir or head:GetForward()
+    local n = 0
+    for _, sw in ipairs(ents.FindByClass("gmod_track_switch")) do
+        if IsValid(sw) then
+            local rel = sw:GetPos() - ref
+            local fd  = rel:Dot(dir)
+            local lat = (rel - dir * fd):Length()
+            if math.abs(fd) < 450 * AI.U_PER_M and lat < 1000 then
+                n = n + 1
+                line(string.format("  switch %s  fwd=%+.0fm  lat=%.0fu  alt=%s",
+                    tostring(sw:GetNW2String("ID", "?")), fd / AI.U_PER_M, lat, tostring(sw.AlternateTrack)))
+                if n >= 10 then break end
+            end
+        end
+    end
+    if n == 0 then line("  no switches within ~450 m either direction (single-track / stub terminus?)") end
+end
+
 --------------------------------------------------------------------------------
 -- Register console commands
 --------------------------------------------------------------------------------
+concommand.Add("metrostroi_ai_termdebug", function(ply) AI.CmdTermDebug(ply) end)
 concommand.Add("metrostroi_ai_add",    function(ply) AI.CmdAdd(ply) end)
 concommand.Add("metrostroi_ai_arsdebug", function(ply) AI.CmdArsDebug(ply) end)
 concommand.Add("metrostroi_ai_doordebug", function(ply) AI.CmdDoorDebug(ply) end)
@@ -294,6 +381,7 @@ hook.Add("PlayerSay", "MetrostroiAI.Chat", function(ply, text)
     elseif sub == "couple" then AI.CmdCouple(ply)
     elseif sub == "ars" then AI.CmdArsDebug(ply)
     elseif sub == "doors" or sub == "door" then AI.CmdDoorDebug(ply)
+    elseif sub == "term" or sub == "terminus" then AI.CmdTermDebug(ply)
     elseif sub == "list" then AI.CmdList(ply)
     elseif sub == "help" then AI.CmdHelp(ply)
     else AI.CmdHelp(ply) end
