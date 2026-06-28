@@ -29,10 +29,10 @@ local ARRIVE_SPEED, TERMINUS_BUFFER = C.ARRIVE_SPEED, C.TERMINUS_BUFFER
 local PROBE_M    = 220   -- how far ahead to watch for the buffer while crawling a leg
 local CLOSE_END_M = 45   -- only a buffer THIS close (a dead-end stub) stops a leg; a farther
                          -- one is past where the crossover diverts us, so it must not brake us
-local THROAT_M   = 280   -- a turn-back crossover's first switch is within this of us. Wide
-                         -- enough to see the running-line scissors PAST a depot throat (so we
-                         -- prefer the direct chain1->chain2 move over diverting into the
-                         -- depot), but not so wide we pull in an unrelated far junction.
+local THROAT_M   = 180   -- a turn-back crossover's first switch is within this of us; farther
+                         -- means a junction past the local throat (e.g. a different terminus's
+                         -- running-line scissors) that we should NOT divert toward instead of
+                         -- the local turn-back the dispatcher uses here.
 
 -- The mechanical reverse: flip the travel sense so the bogeys drive the other way.
 -- No switch throwing here - the turn-back engine lines switches via routes only.
@@ -118,16 +118,43 @@ function DRIVER:PlanTurnback()
                     if divertFd and maxfd and maxfd > -HALF_CAR and chainOf(sig.Name) == ourCh then
                         cands[#cands + 1] = { sig = sig, k = k, name = v.RouteName,
                                               switches = v.Switches, divertFd = divertFd,
-                                              landCh = chainOf(v.NextSignal) }
+                                              nextSig = v.NextSignal, landCh = chainOf(v.NextSignal) }
                     end
                 end
             end
         end
     end
 
-    -- Does a tail chain T reach the RETURN track in ONE more leg? (a route on a signal
-    -- sitting on T that lands on the return chain). This is what tells the AK sawtooth's
-    -- ch4 tail (RCAK7 -> AKG -> ch2) from the ch3 depot dead-end. Cached per tail.
+    -- FOLLOW the route graph (signal -> route -> NextSignal -> ...) to see whether a route
+    -- eventually reaches the return chain, and in how many hops. The crucial bit: a route's
+    -- OWN NextSignal is not where the train ends up - the leg-2 route 'AK3-1' has NextSignal
+    -- AKFIX1 (still ch4), yet the rail past it leads on to the return. So we must chase the
+    -- chain, not read the immediate landing chain. Cached per start signal.
+    local hopCache = {}
+    local function hopsToReturn(startNx)
+        if not returnCh then return nil end
+        if hopCache[startNx] ~= nil then return hopCache[startNx] or nil end
+        local q, qi, seen = { { startNx, 0 } }, 1, {}
+        while qi <= #q do
+            local nx, h = q[qi][1], q[qi][2]; qi = qi + 1
+            if isstring(nx) and nx ~= "" and nx ~= "*" and not seen[nx] and h <= 8 then
+                seen[nx] = true
+                if chainOf(nx) == returnCh then hopCache[startNx] = h; return h end
+                local sg = byName[nx]
+                if IsValid(sg) and istable(sg.Routes) then
+                    for _, r in ipairs(sg.Routes) do
+                        if isstring(r.NextSignal) then q[#q + 1] = { r.NextSignal, h + 1 } end
+                    end
+                end
+            end
+        end
+        hopCache[startNx] = false
+        return nil
+    end
+
+    -- Does a tail chain T reach the RETURN track in ONE more leg (after we reverse onto it)?
+    -- A route on a signal sitting on T whose chain reaches the return. Tells the AK sawtooth's
+    -- ch4 tail (AK1 'AK3-1' -> ... -> ch2) from the ch3 depot dead-end. Cached per tail.
     local tailCache = {}
     local function tailReachesReturn(T)
         if not (T and returnCh) then return false end
@@ -137,7 +164,7 @@ function DRIVER:PlanTurnback()
             if IsValid(sg) and istable(sg.Routes) and chainOf(sg.Name) == T then
                 for _, r in ipairs(sg.Routes) do
                     if istable(r) and isstring(r.Switches) and r.Switches:find("%-")
-                       and chainOf(r.NextSignal) == returnCh then tailCache[T] = true; break end
+                       and hopsToReturn(r.NextSignal) ~= nil then tailCache[T] = true; break end
                 end
             end
             if tailCache[T] then break end
@@ -145,38 +172,33 @@ function DRIVER:PlanTurnback()
         return tailCache[T]
     end
 
-    -- Rank by HOW the leg reaches the return track, NOT by which switch is nearest - a
-    -- dead stub often diverts a nearer switch than the real return route (SV2005 'SV5-'
-    -- beating SV1R1). Within a fixed local throat (so an unrelated far junction that only
-    -- touches the line-long return rail is out):
-    --   DIRECT (3)  lands straight on the return chain (a plain scissors: SV1R1)
-    --   VIA-TAIL(2) lands on a tail from which one more leg reaches the return (AK: cross
-    --               to ch4, reverse, RCAK7 -> ch2 - the depot sawtooth)
-    --   tail (1)    lands on some other real track (best-effort)
-    --   stub (0)    dead end ('-> *')
-    -- nearest entry breaks ties within a tier.
+    -- Rank by HOW the leg reaches the return track:
+    --   DIRECT (3)  its rail chains all the way to the return (SV1R1; AK leg-2 'AK3-1')
+    --   VIA-TAIL(2) lands on a tail from which one more leg reaches the return (AK leg-1
+    --               'AK2-3': cross to ch4, reverse, then 'AK3-1' -> ch2)
+    --   tail (1)    some other real track (best-effort); stub (0) a dead end '-> *'
+    -- Then prefer a NAMED route (one a dispatcher would "!sopen") - the mapper's intended
+    -- move, which picks the diagonal that actually works; an unnamed twin (RCAK7) often
+    -- crosses on the other diagonal and derails. Then fewest hops, then nearest entry.
     local best, bestScore
     for _, c in ipairs(cands) do
         if c.divertFd <= THROAT_M * U_PER_M then
-            local direct  = returnCh and c.landCh == returnCh or false
+            local h       = hopsToReturn(c.nextSig)
+            local direct  = h ~= nil
             local real    = c.landCh ~= nil and c.landCh ~= ourCh
             local viaTail = (not direct) and real and tailReachesReturn(c.landCh) or false
-            local kind  = direct and 3 or (viaTail and 2 or (real and 1 or 0))
-            -- Prefer a NAMED route (one a dispatcher would "!sopen") over an unnamed/auto
-            -- one of the same kind - the named route is the mapper's intended movement and
-            -- picks the diagonal that actually works; the unnamed twin often crosses on the
-            -- other diagonal that derails. Then nearest entry.
-            local named = c.name ~= nil and c.name ~= ""
-            local score = kind * 1e7 + (named and 1e5 or 0) - c.divertFd / U_PER_M
-            if not bestScore or score > bestScore then best, bestScore, c.kind = c, score, kind end
+            local kind    = direct and 3 or (viaTail and 2 or (real and 1 or 0))
+            local named   = c.name ~= nil and c.name ~= ""
+            local score = kind * 1e7 + (named and 1e5 or 0) - (h or 0) * 1e3 - c.divertFd / U_PER_M
+            if not bestScore or score > bestScore then best, bestScore, c.kind, c.hops = c, score, kind, h end
         end
     end
     if not best then self.tbPlanStr = "no turn-back crossover on our track ahead"; return nil end
     local kindStr = ({ [3] = "DIRECT", [2] = "via-tail", [1] = "tail", [0] = "stub" })[best.kind or 0]
-    self.tbPlanStr = string.format("%s #%s '%s' sw=%s -> %s (%s)%s @%dm",
+    self.tbPlanStr = string.format("%s #%s '%s' sw=%s -> %s (%s%s) @%dm",
         tostring(best.sig.Name), tostring(best.k), tostring(best.name or "?"), tostring(best.switches),
         best.landCh and ("ch" .. best.landCh) or "stub", kindStr,
-        (returnCh and best.landCh == returnCh) and " <<RETURN" or "",
+        best.hops and (", " .. best.hops .. "hop->return") or "",
         math.Round(best.divertFd / U_PER_M))
     -- Only COMMIT a leg that actually reaches the return track - DIRECT (lands on it) or
     -- VIA-TAIL (a tail one leg short of it). A bare stub/dead-tail (kind < 2) is never the
