@@ -65,18 +65,23 @@ end
 -- "continues" here and so can never trigger a stop or a turn-back. Conservative:
 -- any uncertainty (no API / lost the rail sideways) returns nil = "continues".
 function DRIVER:TrackEndAhead(maxScan)
-    if not (Metrostroi.GetPositionOnTrack and isvector(self.travelDir)) then return nil end
-    local dir = Vector(self.travelDir); dir:Normalize()
-    -- start at the foremost point of the train (nose) in the travel direction
-    local ref, best = nil, -math.huge
-    for _, w in ipairs(self.wagons or {}) do
-        if IsValid(w) then
-            local d = w:GetPos():Dot(dir)
-            if d > best then best, ref = d, w:GetPos() end
-        end
-    end
-    if not isvector(ref) then return nil end
-    local prev, gone, step = ref + dir * AI.HALF_CAR, 0, 8     -- 8 m probe steps
+    if not (Metrostroi.GetPositionOnTrack and Metrostroi.GetTrackPosition) then return nil end
+    local head = self:GetHead()
+    local tp   = IsValid(head) and Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
+    local pos  = tp and tp[1]
+    if not (pos and pos.path and pos.x and pos.node1 and isvector(pos.node1.dir)
+            and isvector(self.travelDir)) then return nil end
+    -- Start at the nose, but RAIL-LEVEL: take the network track position a half-car
+    -- ahead of the head centre (the wagon's own GetPos sits ABOVE the rail, which
+    -- is why scanning from it read as instantly off-track). Then walk the rail
+    -- forward, re-projecting each step onto the nearest track so it follows curves
+    -- AND crosses path-segment boundaries (the dead end was a short segment past
+    -- the current path's end, which the path-end probe never reached).
+    local sgn   = (self.travelDir:Dot(pos.node1.dir) < 0) and -1 or 1
+    local rp, rd = Metrostroi.GetTrackPosition(pos.path, pos.x + sgn * (AI.HALF_CAR / AI.U_PER_M))
+    if not (isvector(rp) and isvector(rd)) then return nil end
+    local dir = Vector(rd); dir:Normalize(); dir = dir * sgn
+    local prev, gone, step = rp, 0, 8                         -- 8 m probe steps
     while gone < maxScan do
         local probe = prev + dir * (step * AI.U_PER_M)
         local ok, res = pcall(Metrostroi.GetPositionOnTrack, probe, dir:Angle())

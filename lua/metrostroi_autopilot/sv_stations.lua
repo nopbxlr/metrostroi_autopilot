@@ -100,7 +100,31 @@ function DRIVER:RegulationHold(now)
     return false
 end
 
+-- Remember where/when we last turned back so the terminus / end-of-track / stuck
+-- logic can't bounce the train straight back to a spot it just reversed at - the
+-- dead-end <-> failed-crossover oscillation. Keep the few most recent points.
+function DRIVER:NoteReverse(now)
+    local head = self:GetHead()
+    if not IsValid(head) then return end
+    self.reverseHistory = self.reverseHistory or {}
+    table.insert(self.reverseHistory, 1, { pos = head:GetPos(), t = now })
+    self.reverseHistory[5] = nil
+end
+
+-- True if we already reversed within the last 2 minutes within ~150 m of here: a
+-- new reverse now would just be oscillating, not serving a fresh terminus.
+function DRIVER:RecentlyReversedNear(now)
+    local head = self:GetHead()
+    if not (IsValid(head) and self.reverseHistory) then return false end
+    local p = head:GetPos()
+    for _, h in ipairs(self.reverseHistory) do
+        if (now - h.t) < 120 and p:Distance(h.pos) < 150 * AI.U_PER_M then return true end
+    end
+    return false
+end
+
 function DRIVER:BeginReverse(now)
+    self:NoteReverse(now)            -- remember this spot so we can't oscillate back to it
     self.travelDir = -self.travelDir
     self.servedPlatform = nil
     self.power = 0
@@ -175,6 +199,12 @@ function DRIVER:FindTurnbackSwitches()
         end
     end
     if partner then out[#out + 1] = partner.sw end
+    -- record the pick so !ai term can show whether we grabbed sensible switches
+    self.turnbackPick = string.format("entry %s (fwd %.0fm, lat %.0fu)%s",
+        entry.sw:GetNW2String("ID", "?"), entry.fd / AI.U_PER_M, entry.lat,
+        partner and string.format("  +  partner %s (fwd %.0fm, lat %.0fu)",
+            partner.sw:GetNW2String("ID", "?"), partner.fd / AI.U_PER_M, partner.lat)
+            or "  (no far-rail partner found)")
     return out
 end
 

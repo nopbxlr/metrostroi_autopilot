@@ -161,6 +161,15 @@ function AI.CmdTermDebug(ply)
     line("  terminus probe (path end): " .. tostring(drv.termWhy))
     local te = drv:TrackEndAhead(200)
     line("  rail scan ahead (geometry): " .. (te and string.format("ENDS %.0fm", te) or "continues past 200m"))
+    if drv.turnbackPick then line("  turnback pick: " .. drv.turnbackPick) end
+    if drv.turnbackSwitches and #drv.turnbackSwitches > 0 then
+        local st = {}
+        for _, sw in ipairs(drv.turnbackSwitches) do
+            if IsValid(sw) then st[#st + 1] = sw:GetNW2String("ID", "?") .. (sw.AlternateTrack and "=ALT" or "=main") end
+        end
+        line("  turnback switches held: " .. table.concat(st, "  "))
+    end
+    line("  recently reversed near here: " .. tostring(drv:RecentlyReversedNear(CurTime())))
     -- What platform (if any) the driver is currently locked onto - the prime
     -- suspect for getting stuck at a terminus is the OPPOSITE-track face being
     -- re-acquired (small farFd, lateral ~= track gap) so the platform block keeps

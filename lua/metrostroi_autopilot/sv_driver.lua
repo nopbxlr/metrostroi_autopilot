@@ -308,7 +308,11 @@ function DRIVER:Think(now)
     -- standalone so the debug can show which one is actually binding.
     local cruise    = math.max(0, AI.CVars.cruise:GetFloat())
     local arsMax    = self:ARSMaxSpeed()
-    local base      = arsMax or cruise
+    -- No ARS code: if the line IS coded and the code just dropped out (an un-coded
+    -- throat / dead-end stub past a terminus), crawl at 7 km/h - un-coded track is
+    -- unsignalled, so feel your way rather than barrel into it. A map with NO ARS at
+    -- all (we never saw a code) isn't crippled: it keeps the normal cruise fallback.
+    local base      = arsMax or (self.arsEverSeen and math.min(cruise, 7) or cruise)
     local curveLim  = self:CurveLimit(pos, 9999)
     local signalLim = self:SignalStop(9999)
     local trainLim  = self:TrainLimit(9999, speed)
@@ -360,8 +364,11 @@ function DRIVER:Think(now)
         if endM then
             local aim = endM - TERMINUS_BUFFER
             if speed <= ARRIVE_SPEED and aim <= 1.2 then
-                if AI.CVars.terminus_rev:GetInt() == 1 then self:BeginReverse(now)
-                else self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TERMINUS (rail ends)") end
+                if AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then
+                    self:BeginReverse(now)
+                else
+                    self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TERMINUS (rail ends)")
+                end
                 return
             end
             local vms  = speed / 3.6
@@ -418,7 +425,7 @@ function DRIVER:Think(now)
         local aim  = term - TERMINUS_BUFFER
         local sdec = math.max(0.2, AI.CVars.station_decel:GetFloat())
         if speed <= ARRIVE_SPEED and aim <= 1.2 then
-            if AI.CVars.terminus_rev:GetInt() == 1 then self:BeginReverse(now)
+            if AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then self:BeginReverse(now)
             else self:ApplyDrive(0, AI.HOLD_BRAKE) end
             return
         end
@@ -446,10 +453,17 @@ function DRIVER:Think(now)
         self.stuckTime = 0
     end
     if (self.stuckTime or 0) > 3 then
-        self.stuckTime, self.hasMoved = 0, false
-        status = "TERMINUS"
-        if AI.CVars.terminus_rev:GetInt() == 1 then self:BeginReverse(now)
-        else self:ApplyDrive(0, AI.HOLD_BRAKE) end
+        if AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then
+            self.stuckTime, self.hasMoved = 0, false
+            status = "TERMINUS"
+            self:BeginReverse(now)
+            return
+        end
+        -- Stuck again right after a turn-back nearby: that's the dead-end <-> failed-
+        -- crossover oscillation, not a fresh terminus. Hold instead of bouncing back.
+        self.stuckTime = 0
+        self:ApplyDrive(0, AI.HOLD_BRAKE)
+        self:SetStatus("STUCK (held; turned back nearby)")
         return
     end
 
