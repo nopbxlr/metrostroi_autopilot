@@ -355,18 +355,43 @@ function DRIVER:OpenTurnbackRoute()
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
     end
-    -- where a route's destination signal sits: its track chain, and whether that
-    -- chain serves stations at all (a "line" track vs a depot/yard track).
-    local function destChain(nx)
-        local sg = byName[nx or ""]
+    -- The chain a signal sits on (by name).
+    local function chainOf(nm)
+        local sg = byName[nm or ""]
         if not IsValid(sg) then return nil end
         local tp = sg.TrackPosition
         if not (istable(tp) and tp.path) then return nil end
         return (AI.ChainPos(math.floor(tonumber(tp.path.id) or 0), tp.x or 0))
     end
-    -- Pick the route by, in order: (1) it lands on the RETURN track's chain - the line
-    -- we actually continue on, so it can't be a reversing stub or the depot; (2) it at
-    -- least lands on SOME line track; (3) it throws the most of our geometric switches.
+    -- Fewest ROUTE-HOPS from a signal until the path lands on the RETURN track. A real
+    -- terminus throat has no single crossover from our track to the return track - the
+    -- turn-back threads several signals (our chain -> throat sidings -> ... -> return
+    -- chain) - so we follow the route graph, not just the immediate destination. A
+    -- reversing stub or a depot spur never reaches the return chain, so it scores 0.
+    local hopCache = {}
+    local function hopsToReturn(startNx)
+        if not returnCi then return nil end
+        if hopCache[startNx] ~= nil then return hopCache[startNx] or nil end
+        local q, qi, seen = { { startNx, 0 } }, 1, {}
+        while qi <= #q do
+            local nx, h = q[qi][1], q[qi][2]; qi = qi + 1
+            if isstring(nx) and nx ~= "" and nx ~= "*" and not seen[nx] and h <= 8 then
+                seen[nx] = true
+                if chainOf(nx) == returnCi then hopCache[startNx] = h; return h end
+                local sg = byName[nx]
+                if IsValid(sg) and istable(sg.Routes) then
+                    for _, r in ipairs(sg.Routes) do
+                        if isstring(r.NextSignal) then q[#q + 1] = { r.NextSignal, h + 1 } end
+                    end
+                end
+            end
+        end
+        hopCache[startNx] = false
+        return nil
+    end
+    -- Pick the route whose path reaches the RETURN track in the FEWEST hops; ties by
+    -- how many of our geometric switches it throws. Falls back to a line-track / most-
+    -- switches pick when nothing reaches the return track (no return chain / no PA).
     local maxFd = (TURNBACK_SCAN_M + 50) * AI.U_PER_M
     local best, bestK, bestScore, bestName, bestTag
     for _, sig in ipairs(ents.FindByClass("gmod_track_signal")) do
@@ -377,16 +402,15 @@ function DRIVER:OpenTurnbackRoute()
                     for _, e in ipairs(string.Explode(",", v.Switches)) do
                         if e ~= "" and e:sub(-1) == "-" and want[e:sub(1, -2):upper()] then overlap = overlap + 1 end
                     end
-                    local dci      = destChain(v.NextSignal)
-                    local onReturn = dci and returnCi and dci == returnCi or false
-                    local line     = dci and AI.IsLinePath
-                                     and (byName[v.NextSignal] and istable(byName[v.NextSignal].TrackPosition)
-                                          and byName[v.NextSignal].TrackPosition.path
-                                          and AI.IsLinePath(math.floor(tonumber(byName[v.NextSignal].TrackPosition.path.id) or 0))) or false
-                    local score    = (onReturn and 1000 or 0) + (line and 100 or 0) + overlap
+                    local h    = hopsToReturn(v.NextSignal)
+                    local dci  = chainOf(v.NextSignal)
+                    local line = dci and AI.Route and AI.Route.chainStations
+                                 and AI.Route.chainStations[dci] and #AI.Route.chainStations[dci] > 0 or false
+                    local score = (h ~= nil and (1000 - h * 10) or 0) + (line and 30 or 0) + overlap
                     if score > 0 and (not bestScore or score > bestScore) then
                         best, bestK, bestScore, bestName = sig, k, score, v.RouteName
-                        bestTag = onReturn and "-> RETURN LINE" or (line and "-> line (maybe stub)" or "geometric")
+                        bestTag = (h ~= nil) and string.format("-> RETURN in %d hop(s)", h)
+                                  or (line and "-> line (not return track)" or "geometric")
                     end
                 end
             end
