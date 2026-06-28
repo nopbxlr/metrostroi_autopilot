@@ -128,24 +128,11 @@ function DRIVER:BeginStationStop(now, pf)
     -- the throat, not at the platform - so we must NOT reverse here; run on into the
     -- tail and turn back there instead.
     self.servedDeadlock = info and (info.dlStart ~= nil or info.dlEnd ~= nil) or false
-    -- At a terminus, remember the chain of the OPPOSITE running track (this station's
-    -- other platform face) - the line we actually continue on after turning back. The
-    -- route picker prefers a route landing on THIS chain so it can't pick a reversing
-    -- stub that merely happens to share a line chain.
-    self.returnChainCi = nil
-    if self.servedIsTerminus and AI.ChainPos and Metrostroi.GetPositionOnTrack then
-        for _, op in ipairs(self.platforms or {}) do
-            if IsValid(op) and op ~= pf and op.StationIndex == pf.StationIndex
-               and isvector(op.PlatformStart) and isvector(op.PlatformEnd) then
-                local c = (op.PlatformStart + op.PlatformEnd) * 0.5
-                local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, op:GetAngles())
-                if ok and res and res[1] and res[1].path then
-                    local ci = AI.ChainPos(math.floor(tonumber(res[1].path.id) or 0), res[1].x or 0)
-                    if ci then self.returnChainCi = ci; break end
-                end
-            end
-        end
-    end
+    -- At a terminus, lock in the OPPOSITE running track now (while we're still berthed on
+    -- our arrival track) - that's the line we continue on after turning back. The route
+    -- picker prefers a route landing on THIS chain, so it can't pick a stub (e.g. 551) that
+    -- merely happens to be reachable from the throat.
+    self.returnChainCi = self.servedIsTerminus and self:OppositeRunningChain(self:CurrentChain()) or nil
     self:ApplyDrive(0, AI.HOLD_BRAKE)
     if AI.CVars.open_doors:GetInt() == 1 then self:OpenDoors(pf) end
     hook.Run("MetrostroiAI.StationStop", self, pf)
@@ -210,54 +197,60 @@ function DRIVER:RecentlyReversedNear(now)
     return false
 end
 
--- The route chain of the RETURN track at the terminus we're at - the opposite
--- running track we continue on after turning back. Prefer the value recorded when
--- we dwelled (returnChainCi); else derive it geometrically so it works even when a
--- train is engaged already in the throat: the nearest station's OTHER platform
--- face is the return track (we're laterally on our own arrival track, so the other
--- face is the one we did NOT arrive on).
-function DRIVER:ReturnTrackChain()
-    if self.returnChainCi then return self.returnChainCi end
-    if not (AI.ChainPos and Metrostroi.GetPositionOnTrack) then return nil end
+-- The chain our train's head is currently on.
+function DRIVER:CurrentChain()
+    if not (AI.ChainPos and Metrostroi.TrainPositions) then return nil end
     local head = self:GetHead(); if not IsValid(head) then return nil end
-    local hp = head:GetPos()
-    local mine, md
+    local tp = Metrostroi.TrainPositions[head]
+    local p  = tp and tp[1]
+    if p and p.path then return AI.ChainPos(math.floor(tonumber(p.path.id) or 0), p.x or 0) end
+end
+
+-- The opposite RUNNING track of chain C - the return track after a turn-back. The two
+-- running tracks of a line are exactly the chains that carry this line's platform faces
+-- (each station has one face on each direction). So: resolve every platform face to a
+-- chain, group by station, and for every station that has a face on C, tally the OTHER
+-- chain at that station. The most-tallied chain is the opposite running track. A throat
+-- or stabling spur (e.g. 551) carries no platform face, so it can never be picked - which
+-- is the whole bug we kept hitting (turn-backs diverting off the line onto a stub).
+function DRIVER:OppositeRunningChain(C)
+    if not (C and AI.ChainPos and Metrostroi.GetPositionOnTrack) then return nil end
+    local byStation = {}
     for _, pf in ipairs(self.platforms or {}) do
         if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
-            local d = ((pf.PlatformStart + pf.PlatformEnd) * 0.5):Distance(hp)
-            if not md or d < md then mine, md = pf, d end
+            local c = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+            local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, pf:GetAngles())
+            if ok and res and res[1] and res[1].path then
+                local ci = AI.ChainPos(math.floor(tonumber(res[1].path.id) or 0), res[1].x or 0)
+                if ci then
+                    local si = pf.StationIndex
+                    byStation[si] = byStation[si] or {}
+                    byStation[si][ci] = true
+                end
+            end
         end
     end
-    if not mine then return nil end
-    local function chainOfFace(pf)
-        local c = (pf.PlatformStart + pf.PlatformEnd) * 0.5
-        local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, pf:GetAngles())
-        if ok and res and res[1] and res[1].path then
-            return (AI.ChainPos(math.floor(tonumber(res[1].path.id) or 0), res[1].x or 0))
+    local tally = {}
+    for _, chains in pairs(byStation) do
+        if chains[C] then
+            for ci in pairs(chains) do
+                if ci ~= C then tally[ci] = (tally[ci] or 0) + 1 end
+            end
         end
     end
-    -- The return track is this terminus's DEPARTURE face: the through side, flagged
-    -- PALastStation FALSE (the arrival/reverse face is PALastStation TRUE). That is a FIXED
-    -- property of the station - unlike "the other face", which once we've crossed to the
-    -- departure side points back at the ARRIVAL side and sends us across to the wrong line.
-    local arrival, depart
-    for _, pf in ipairs(self.platforms or {}) do
-        if IsValid(pf) and pf.StationIndex == mine.StationIndex
-           and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
-            local info = self:PAInfoFor(pf)
-            if info and info.isLast then arrival = pf
-            elseif info then depart = pf end
-        end
-    end
-    if arrival and depart then return chainOfFace(depart) end
-    -- No PALastStation distinction (or no PA data): fall back to the OTHER face.
-    for _, pf in ipairs(self.platforms or {}) do
-        if IsValid(pf) and pf ~= mine and pf.StationIndex == mine.StationIndex
-           and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
-            return chainOfFace(pf)
-        end
-    end
-    return nil
+    local best, bestN = nil, 0
+    for ci, n in pairs(tally) do if n > bestN then best, bestN = ci, n end end
+    return best
+end
+
+-- The route chain of the RETURN track at the terminus we're at - the opposite running
+-- track we continue on after turning back. Locked into returnChainCi at the start of the
+-- maneuver (while we're still on our ARRIVAL running track); recomputing it after we cross
+-- would point back at the track we just left and ping-pong. Falls back to a live compute
+-- from the current chain when nothing is locked yet (e.g. engaged already in the throat).
+function DRIVER:ReturnTrackChain()
+    if self.returnChainCi then return self.returnChainCi end
+    return self:OppositeRunningChain(self:CurrentChain())
 end
 
 -- Are we already on the return track's chain? (Once we've crossed over we must

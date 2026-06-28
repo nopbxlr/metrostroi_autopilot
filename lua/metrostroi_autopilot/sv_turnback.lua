@@ -376,6 +376,10 @@ end
 
 -- Begin the maneuver. Returns true if it took control.
 function DRIVER:StartTurnback(now)
+    -- Lock the return track NOW, while we're still on our arrival running track (the
+    -- opposite running track of the line). If a dwell already locked it, keep that; only
+    -- compute here for a no-dwell turn-back (rail ends ahead with no terminus platform).
+    if not self.returnChainCi then self.returnChainCi = self:OppositeRunningChain(self:CurrentChain()) end
     local leg = self:PlanTurnback()
     if leg then
         self.tb = { phase = "LEG1", leg = leg }
@@ -412,13 +416,13 @@ function DRIVER:TurnbackThink(now, dt, speed)
         if now >= (tb.holdUntil or 0) then
             if self:OnReturnTrack() then
                 self:CloseLeg(tb.leg)                           -- straighten the crossover so we run OUT on the return track, not get diverted back across it
-                self.tb = nil                                   -- direct crossover: done
+                self.tb = nil; self.returnChainCi = nil         -- direct crossover: done
             else
                 local leg = self:PlanTurnback()                 -- re-plan the come-back leg
                 if leg then
                     self:CloseLeg(tb.leg)                        -- clear leg-1's switches first
                     tb.leg = leg; tb.phase = "LEG2"; self:OpenLeg(leg)
-                else self:CloseLeg(tb.leg); self.tb = nil end    -- no leg 2: straighten & stop cleanly
+                else self:CloseLeg(tb.leg); self.tb = nil; self.returnChainCi = nil end  -- no leg 2: straighten & stop cleanly
             end
         end
         return
@@ -459,7 +463,7 @@ function DRIVER:TurnbackThink(now, dt, speed)
     -- platform's chain can be far ahead, which left us crawling past every station in LEG2.
     if tb.phase == "LEG2" and self:LegSwitchesCleared(leg) then
         self:CloseLeg(leg)                                       -- straighten the throat behind us
-        self.tb = nil; self:SetStatus("TURNBACK done"); return
+        self.tb = nil; self.returnChainCi = nil; self:SetStatus("TURNBACK done"); return
     end
 
     -- LEG1 fully across the points -> reverse. Leg 1 lands us on the pull track (or, at a
