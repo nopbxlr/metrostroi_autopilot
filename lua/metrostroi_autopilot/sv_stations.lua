@@ -426,19 +426,18 @@ function DRIVER:OpenTurnbackRoute()
         hopCache[startNx] = false
         return nil
     end
-    -- Pick the route whose path reaches the RETURN track in the FEWEST hops; ties by
-    -- how many of our geometric switches it throws. Falls back to a line-track / most-
-    -- switches pick when nothing reaches the return track (no return chain / no PA).
+    -- Collect every route that would divert OUR rail at a switch AHEAD of us: the real
+    -- turn-back candidates. We REQUIRE that local diversion (divertFd) - "reaches the
+    -- return chain" alone is useless here, because the return track is the whole line-
+    -- long running rail, so a crossover ANYWHERE on the map touches it. That coarseness
+    -- is exactly how an unrelated far junction (KR3, hundreds of metres away) kept being
+    -- picked over the scissors right in front of us.
     local maxFd = (TURNBACK_SCAN_M + 50) * AI.U_PER_M
-    local best, bestK, bestScore, bestName, bestTag
+    local cands, nearest = {}, nil
     for _, sig in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sig) and istable(sig.Routes) and sig:GetPos():Distance(ref) < maxFd then
             for k, v in pairs(sig.Routes) do
                 if istable(v) and isstring(v.Switches) and v.Switches:find("%-") then
-                    -- Position of this route's crossover: farthest switch (must be AHEAD,
-                    -- so we never grab a crossover we've already driven past - e.g. the
-                    -- previous station's, which reaches the line-long return track too)
-                    -- and nearest switch (the crossover we'd hit FIRST, the tie-break).
                     local maxfd, divertFd
                     for _, e in ipairs(string.Explode(",", v.Switches)) do
                         if e ~= "" then
@@ -451,11 +450,8 @@ function DRIVER:OpenTurnbackRoute()
                                 if not maxfd or fd > maxfd then maxfd = fd end
                                 -- nearest '-' point AHEAD and on OUR rail (small lateral
                                 -- offset) = the scissors entry it would actually divert US
-                                -- at. Measured straight off the switch (not via a 120 m-
-                                -- windowed set) so it's still valid at the early commit
-                                -- distance (~240 m out, where that window was empty) - that
-                                -- emptiness let a far return route tie and lock instead of
-                                -- the crossover right in front of us.
+                                -- at. Measured straight off the switch so it's valid even at
+                                -- the early commit distance (~240 m out).
                                 if e:sub(-1) == "-" and fd > -AI.HALF_CAR and lat < TURNBACK_NEAR_U then
                                     local a = math.abs(fd)
                                     if not divertFd or a < divertFd then divertFd = a end
@@ -463,51 +459,47 @@ function DRIVER:OpenTurnbackRoute()
                             end
                         end
                     end
-                    if maxfd and maxfd > -AI.HALF_CAR then   -- its points extend ahead of us
+                    -- Must divert OUR rail ahead (rejects parallel-track / off-rail routes),
+                    -- and its points must extend ahead of us.
+                    if divertFd and maxfd and maxfd > -AI.HALF_CAR then
                         local h    = hopsToReturn(v.NextSignal)
                         local dci  = chainOf(v.NextSignal)
                         local line = dci and AI.Route and AI.Route.chainStations
                                      and AI.Route.chainStations[dci] and #AI.Route.chainStations[dci] > 0 or false
-                        -- STRONGLY prefer a route on a signal that governs OUR track (so
-                        -- its switches divert us, not a parallel-track movement). Then a
-                        -- route that diverts our rail / reaches the return track / fewest
-                        -- hops / nearest crossover. No switch-overlap (it fed back on its
-                        -- own pick); these are all geometric and stable.
                         local onOurChain = ourChain and chainOf(sig.Name) == ourChain or false
-                        -- governs OUR track (1e7) so its points divert US, not a parallel
-                        -- movement - this is the real guard against picking a route that
-                        -- leaves us running straight; THEN reaches the RETURN track (1e6):
-                        -- the whole point of the move, so a stub that merely diverts our
-                        -- rail into a dead pull-track (SV2005 'SV5-') can NEVER beat the
-                        -- route that crosses to the return line (SV1R1). From our own chain
-                        -- you can't reach the return chain without crossing over, so an
-                        -- on-our-track route that reaches it inherently grabs our rail -
-                        -- even when the geometric divertFd window happens to miss the point.
-                        -- Then diverts our rail (1e5) at the nearest entry - this is what
-                        -- carries a SAWTOOTH terminus (AK2-4) that has no through-route to
-                        -- the return track in one move; then any line track (1e4). Tie-
-                        -- breaks (<1e4): fewer route-hops, then nearer crossover.
-                        local score = (onOurChain and 1e7 or 0)
-                                      + (h ~= nil and 1e6 or 0)
-                                      + (divertFd and 1e5 or 0)
-                                      + (line and 1e4 or 0)
-                                      - (h or 0) * 50
-                                      - (divertFd or 0) / AI.U_PER_M
-                        if (onOurChain or divertFd or h ~= nil or line)
-                           and (not bestScore or score > bestScore) then
-                            best, bestK, bestScore, bestName = sig, k, score, v.RouteName
-                            bestTag = string.format("%s%s",
-                                onOurChain and "OUR-track " or "OTHER-track ",
-                                h ~= nil and string.format("-> RETURN %dhop", h)
-                                or (divertFd and string.format("diverts our rail @%dm", math.Round(divertFd / AI.U_PER_M))
-                                or "-> line"))
-                        end
+                        cands[#cands + 1] = { sig = sig, k = k, name = v.RouteName, divertFd = divertFd,
+                                              reaches = (h ~= nil), line = line, onOurChain = onOurChain, h = h }
+                        if not nearest or divertFd < nearest then nearest = divertFd end
                     end
                 end
             end
         end
     end
-    if not best then self.turnbackRoute = "no diverting route nearby"; return false end
+    -- ANCHOR to the local throat: keep only crossovers whose entry is within one crossover
+    -- diagonal of the NEAREST one ahead. This drops the unrelated far junction - it diverts
+    -- our rail too (it's on our line), but it's well past the scissors we're about to take.
+    local best, bestK, bestScore, bestName, bestTag
+    local throat = (nearest or 0) + TURNBACK_DIAG_M * AI.U_PER_M
+    for _, c in ipairs(cands) do
+        if c.divertFd <= throat then
+            -- governs OUR track (1e7); reaches a real continuation - the return track or
+            -- any line track, NOT a dead pull-track stub (1e6); then the NEAREST entry
+            -- (- divertFd) so among the throat's crossovers we take the first one that
+            -- actually goes somewhere. A pure stub (SV2005 'SV5-') loses the 1e6.
+            local score = (c.onOurChain and 1e7 or 0)
+                          + ((c.reaches or c.line) and 1e6 or 0)
+                          - c.divertFd / AI.U_PER_M
+            if not bestScore or score > bestScore then
+                best, bestK, bestScore, bestName = c.sig, c.k, score, c.name
+                bestTag = string.format("%s%s @%dm",
+                    c.onOurChain and "OUR-track " or "OTHER-track ",
+                    c.reaches and string.format("-> RETURN %dhop", c.h)
+                        or (c.line and "-> line" or "-> STUB"),
+                    math.Round(c.divertFd / AI.U_PER_M))
+            end
+        end
+    end
+    if not best then self.turnbackRoute = "no diverting crossover ahead"; return false end
     self.turnbackRouteRef, self.turnbackCrossed = { sig = best, k = bestK }, nil   -- commit & lock; not crossed yet
     pcall(best.OpenRoute, best, bestK)
     -- Adopt ONLY the route's alt ("-") switches so MaintainTurnback re-asserts the
