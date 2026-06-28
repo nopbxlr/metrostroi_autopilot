@@ -235,12 +235,26 @@ function AI.CmdTermDebug(ply)
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
     end
+    local rdir = isvector(drv.travelDir) and drv.travelDir or head:GetForward()
     local shown = 0
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and istable(sg.Routes) and sg:GetPos():Distance(ref) < 3500 then
             for _, r in ipairs(sg.Routes) do
                 local sw = r.Switches
                 if isstring(sw) and sw:find("%-") and shown < 16 then
+                    -- farthest thrown switch's forward distance: the crossover the
+                    -- selector treats as "ahead" only if this is > about -9 m
+                    local swfd
+                    for _, e in ipairs(string.Explode(",", sw)) do
+                        if e ~= "" then
+                            local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(e:sub(1, -2))
+                            if IsValid(s) then
+                                local fd = (s:GetPos() - ref):Dot(rdir) / AI.U_PER_M
+                                if not swfd or fd > swfd then swfd = fd end
+                            end
+                        end
+                    end
+                    local fdtag = swfd and string.format(" pts%+.0fm", swfd) or " pts?"
                     local nx  = r.NextSignal or ""
                     local cls, dDepot = "?", ""
                     local nsig = byName[nx]
@@ -257,8 +271,8 @@ function AI.CmdTermDebug(ply)
                     end
                     local mark = (dci and rc and dci == rc) and "  <<RETURN" or ""
                     shown = shown + 1
-                    line(string.format("  %s '%s'  sw=%s  -> %s [%s] ch=%s%s%s",
-                        tostring(sg.Name), tostring(r.RouteName or ""), sw, nx, cls, tostring(dci), dDepot, mark))
+                    line(string.format("  %s '%s'  sw=%s  -> %s [%s] ch=%s%s%s%s",
+                        tostring(sg.Name), tostring(r.RouteName or ""), sw, nx, cls, tostring(dci), fdtag, dDepot, mark))
                 end
             end
         end

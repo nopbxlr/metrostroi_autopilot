@@ -357,14 +357,6 @@ function DRIVER:OpenTurnbackRoute()
     local ref = head:GetPos()
     local dir = isvector(self.travelDir) and self.travelDir or head:GetForward()
     local returnCi = self:ReturnTrackChain()
-    -- switches we think the crossover physically uses (geometric pick), for tie-break
-    local want = {}
-    for _, sw in ipairs(self.turnbackSwitches or {}) do
-        if IsValid(sw) then
-            local id = (sw:GetNW2String("ID", "") or ""):upper()
-            if id ~= "" then want[id] = true end
-        end
-    end
     local byName = {}
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
@@ -412,17 +404,18 @@ function DRIVER:OpenTurnbackRoute()
         if IsValid(sig) and istable(sig.Routes) and sig:GetPos():Distance(ref) < maxFd then
             for k, v in pairs(sig.Routes) do
                 if istable(v) and isstring(v.Switches) and v.Switches:find("%-") then
-                    -- The crossover must be AHEAD of us - the points we're about to
-                    -- drive through - so we never grab the PREVIOUS station's crossover
-                    -- behind us that also happens to reach the (line-long) return track.
-                    local maxfd, overlap = nil, 0
+                    -- Position of this route's crossover: farthest switch (must be AHEAD,
+                    -- so we never grab a crossover we've already driven past - e.g. the
+                    -- previous station's, which reaches the line-long return track too)
+                    -- and nearest switch (the crossover we'd hit FIRST, the tie-break).
+                    local maxfd, nearAbs
                     for _, e in ipairs(string.Explode(",", v.Switches)) do
                         if e ~= "" then
-                            if e:sub(-1) == "-" and want[e:sub(1, -2):upper()] then overlap = overlap + 1 end
                             local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(e:sub(1, -2))
                             if IsValid(s) then
                                 local fd = (s:GetPos() - ref):Dot(dir)
                                 if not maxfd or fd > maxfd then maxfd = fd end
+                                if not nearAbs or math.abs(fd) < nearAbs then nearAbs = math.abs(fd) end
                             end
                         end
                     end
@@ -431,11 +424,16 @@ function DRIVER:OpenTurnbackRoute()
                         local dci  = chainOf(v.NextSignal)
                         local line = dci and AI.Route and AI.Route.chainStations
                                      and AI.Route.chainStations[dci] and #AI.Route.chainStations[dci] > 0 or false
-                        local score = (h ~= nil and (1000 - h * 10) or 0) + (line and 30 or 0) + overlap
+                        -- reaches the return track -> fewest hops, then the NEAREST
+                        -- crossover ahead (so we take the throat points in front of us,
+                        -- not a farther route on the same return track). No switch-
+                        -- overlap term, which fed back on itself and locked one pick in.
+                        local score = (h ~= nil) and (1e6 - h * 3e4 - (nearAbs or 0))
+                                      or (line and 1 or 0)
                         if score > 0 and (not bestScore or score > bestScore) then
                             best, bestK, bestScore, bestName = sig, k, score, v.RouteName
                             bestTag = (h ~= nil) and string.format("-> RETURN in %d hop(s)", h)
-                                      or (line and "-> line (not return track)" or "geometric")
+                                      or "-> line (not return track)"
                         end
                     end
                 end
