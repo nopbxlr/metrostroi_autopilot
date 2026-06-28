@@ -270,9 +270,15 @@ function AI.CmdTermDebug(ply)
                         dci = AI.ChainPos(math.floor(tonumber(nsig.TrackPosition.path.id) or 0), nsig.TrackPosition.x or 0)
                     end
                     local mark = (dci and rc and dci == rc) and "  <<RETURN" or ""
+                    local sigch
+                    if istable(sg.TrackPosition) and sg.TrackPosition.path and AI.ChainPos then
+                        sigch = AI.ChainPos(math.floor(tonumber(sg.TrackPosition.path.id) or 0), sg.TrackPosition.x or 0)
+                    end
+                    local ourMark = (sigch and oc and sigch == oc) and " {OURtrack}" or ""
                     shown = shown + 1
-                    line(string.format("  %s '%s'  sw=%s  -> %s [%s] ch=%s%s%s%s",
-                        tostring(sg.Name), tostring(r.RouteName or ""), sw, nx, cls, tostring(dci), fdtag, dDepot, mark))
+                    line(string.format("  %s(ch%s) '%s'  sw=%s  -> %s [%s] dch=%s%s%s%s%s",
+                        tostring(sg.Name), tostring(sigch), tostring(r.RouteName or ""), sw, nx, cls,
+                        tostring(dci), fdtag, dDepot, mark, ourMark))
                 end
             end
         end

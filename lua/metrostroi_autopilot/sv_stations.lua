@@ -357,6 +357,16 @@ function DRIVER:OpenTurnbackRoute()
     local ref = head:GetPos()
     local dir = isvector(self.travelDir) and self.travelDir or head:GetForward()
     local returnCi = self:ReturnTrackChain()
+    -- our own track's chain: a route only diverts US if it's defined on a signal that
+    -- governs OUR track. A route on a signal on another track sets its switches for
+    -- THAT track's movement; our train just follows our rail through the half-set
+    -- points (typically into the dead pull-track), which is the bug we kept hitting.
+    local ourChain
+    do
+        local otp = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
+        local op  = otp and otp[1]
+        if op and op.path and AI.ChainPos then ourChain = AI.ChainPos(math.floor(tonumber(op.path.id) or 0), op.x or 0) end
+    end
     local byName = {}
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
@@ -441,17 +451,21 @@ function DRIVER:OpenTurnbackRoute()
                         local dci  = chainOf(v.NextSignal)
                         local line = dci and AI.Route and AI.Route.chainStations
                                      and AI.Route.chainStations[dci] and #AI.Route.chainStations[dci] > 0 or false
-                        -- reaches the return track -> prefer one that diverts OUR rail
-                        -- (carries us across), then fewest hops, then the nearest
-                        -- crossover ahead. No switch-overlap term (it fed back on its own
-                        -- previous pick); ourDivert is geometric, so it's stable.
-                        local score = (h ~= nil)
-                                      and (1e6 + ourDivert * 1e4 - h * 3e3 - (nearAbs or 0))
-                                      or (line and 1 or 0)
+                        -- STRONGLY prefer a route on a signal that governs OUR track (so
+                        -- its switches divert us, not a parallel-track movement). Then a
+                        -- route that diverts our rail / reaches the return track / fewest
+                        -- hops / nearest crossover. No switch-overlap (it fed back on its
+                        -- own pick); these are all geometric and stable.
+                        local onOurChain = ourChain and chainOf(sig.Name) == ourChain or false
+                        local score = (onOurChain and 5e6 or 0)
+                                      + ((h ~= nil) and (1e6 + ourDivert * 1e4 - h * 3e3 - (nearAbs or 0))
+                                         or (ourDivert > 0 and 5e5 or (line and 1 or 0)))
                         if score > 0 and (not bestScore or score > bestScore) then
                             best, bestK, bestScore, bestName = sig, k, score, v.RouteName
-                            bestTag = (h ~= nil) and string.format("-> RETURN in %d hop(s)", h)
-                                      or "-> line (not return track)"
+                            bestTag = string.format("%s%s",
+                                onOurChain and "OUR-track " or "OTHER-track ",
+                                (h ~= nil) and string.format("-> RETURN in %d hop(s)", h)
+                                or (ourDivert > 0 and "-> diverts our rail" or "-> line"))
                         end
                     end
                 end
