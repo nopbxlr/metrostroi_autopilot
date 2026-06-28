@@ -25,6 +25,7 @@ local HALF_CAR = AI.HALF_CAR
 local U_PER_M  = AI.U_PER_M
 local TURNBACK_SCAN_M, TURNBACK_NEAR_U = C.TURNBACK_SCAN_M, C.TURNBACK_NEAR_U
 
+local LEG_SETTLE = 0.6   -- seconds to let a just-opened leg's points settle before we roll in
 local THROAT_M   = 180   -- a turn-back crossover's first switch is within this of us; farther
                          -- means a junction past the local throat (e.g. a different terminus's
                          -- running-line scissors) that we should NOT divert toward instead of
@@ -254,12 +255,40 @@ end
 function DRIVER:OpenLeg(leg)
     if IsValid(leg.sig) and leg.sig.OpenRoute then pcall(leg.sig.OpenRoute, leg.sig, leg.k) end
     leg.swList, leg.nextReopen = {}, 0
+    leg.openedAt, leg.ready = CurTime(), false   -- gate: don't roll in until lined, settled & clear
     for _, e in ipairs(string.Explode(",", leg.switches or "")) do
         if e ~= "" then
             local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(e:sub(1, -2))
             if IsValid(s) then leg.swList[#leg.swList + 1] = { sw = s, alt = (e:sub(-1) == "-") } end
         end
     end
+end
+
+-- Are every leg switch physically in the position the route commands? (AlternateTrack ==
+-- the route's +/-). OpenRoute sets these at once, but confirm before we commit to rolling.
+function DRIVER:LegSwitchesSet(leg)
+    if not istable(leg.swList) then return true end
+    for _, it in ipairs(leg.swList) do
+        if IsValid(it.sw) and (it.sw.AlternateTrack and true or false) ~= it.alt then return false end
+    end
+    return true
+end
+
+-- Is another train standing on/near the crossover we're about to take? (any wagon that
+-- isn't ours within ~30 m of a leg switch). Don't line/cross a throat onto another train.
+function DRIVER:ThroatOccupied(leg)
+    if not (istable(leg.swList) and istable(Metrostroi.TrainPositions)) then return false end
+    local mine = {}
+    for _, w in ipairs(self.wagons or {}) do mine[w] = true end
+    for wag in pairs(Metrostroi.TrainPositions) do
+        if IsValid(wag) and not mine[wag] then
+            local wp = wag:GetPos()
+            for _, it in ipairs(leg.swList) do
+                if IsValid(it.sw) and wp:Distance(it.sw:GetPos()) < 30 * U_PER_M then return true end
+            end
+        end
+    end
+    return false
 end
 
 -- Close a leg's route (CloseRoute sends all its switches back to main), so the next leg
@@ -339,6 +368,21 @@ function DRIVER:TurnbackThink(now, dt, speed)
     -- LEG1 / LEG2 : drive the crossover.
     local leg = tb.leg
     self:HoldLeg(leg, now)
+
+    -- SAFEGUARD before rolling into a leg: keep the train stopped until the route is fully
+    -- lined (every point in its commanded position), has had a moment to SETTLE, and the
+    -- crossover ahead is clear of any other train. One-time per leg (once moving we don't
+    -- re-check, or our own train on the points would read as "occupied").
+    if not leg.ready then
+        local occupied = self:ThroatOccupied(leg)
+        if now >= (leg.openedAt or 0) + LEG_SETTLE and self:LegSwitchesSet(leg) and not occupied then
+            leg.ready = true
+        else
+            self:ApplyDrive(0, AI.HOLD_BRAKE)
+            self:SetStatus("TURNBACK " .. tb.phase .. (occupied and " (throat occupied - waiting)" or " (lining route)"))
+            return
+        end
+    end
 
     -- LEG2 complete: once the whole train is CLEAR of the come-back crossover we're on the
     -- return path heading out, so hand back to normal driving (it accelerates and stops at
