@@ -1,0 +1,258 @@
+--------------------------------------------------------------------------------
+-- Terminus turn-back ENGINE  (plan once, then execute deterministically)
+--------------------------------------------------------------------------------
+-- The old turn-back re-scored routes every tick and kept walking the train into
+-- whatever crossover was nearest - straight into the depot at AK. This replaces it
+-- with a PLAN-then-EXECUTE model:
+--
+--   1. PlanTurnback() searches the interlocking's route graph (signal -> route ->
+--      NextSignal) for the crossover that lands us on the RETURN track (the opposite
+--      running rail). It commits to ONE leg and never re-scores mid-maneuver.
+--   2. TurnbackThink() executes a fixed state machine: LEG1 (open the route, hold its
+--      switches lined, crawl through, stop when the whole train is past the points OR
+--      a buffer/red blocks us) -> REVERSE -> (if not yet on the return track) re-plan
+--      and run LEG2 -> done.
+--
+-- One reversal, single train. OpenRoute is the SOLE switch authority (it lines every
+-- switch the route lists; we never raw-throw on top of it). See the saved memory
+-- "metrostroi-switch-route-api" for the exact SendSignal / OpenRoute semantics.
+--------------------------------------------------------------------------------
+if not SERVER then return end
+local AI       = MetrostroiAI
+local DRIVER   = AI.Driver
+local C        = AI.C
+local HALF_CAR = AI.HALF_CAR
+local U_PER_M  = AI.U_PER_M
+local TURNBACK_SCAN_M, TURNBACK_NEAR_U, TURNBACK_DIAG_M =
+    C.TURNBACK_SCAN_M, C.TURNBACK_NEAR_U, C.TURNBACK_DIAG_M
+local ARRIVE_SPEED, TERMINUS_BUFFER, BRAKE_PER_MS2 =
+    C.ARRIVE_SPEED, C.TERMINUS_BUFFER, C.BRAKE_PER_MS2
+
+local PROBE_M = 220   -- how far ahead to watch for the buffer while crawling a leg
+
+-- The mechanical reverse: flip the travel sense so the bogeys drive the other way.
+-- No switch throwing here - the turn-back engine lines switches via routes only.
+function DRIVER:FlipDirection(now)
+    self:NoteReverse(now)                 -- remember this spot (anti-oscillation history)
+    self.travelDir = -self.travelDir
+    self.power = 0
+    self.servedPlatform = nil
+    self.arsReverseCooldown = true        -- don't let the ARS-loss brake fire on the un-coded throat
+end
+
+-- Fallback reverse for a STUB terminus with no crossover route at all: just turn the
+-- train on the same track. Uses the main loop's REVERSE_HOLD state (not the engine).
+function DRIVER:SimpleReverse(now)
+    self:FlipDirection(now)
+    self.state    = "REVERSE_HOLD"
+    self.holdUntil = now + 5
+    self:ApplyDrive(0, AI.HOLD_BRAKE)
+    self:SetStatus("TERMINUS")
+end
+
+--------------------------------------------------------------------------------
+-- PLANNING
+--------------------------------------------------------------------------------
+-- Find the turn-back crossover that takes us toward the RETURN track. Returns a leg
+-- { sig, k, name, switches, landCh, divertFd } or nil, and fills self.tbPlanStr for
+-- the !ai term diagnostic. We require the route to divert OUR rail at a switch AHEAD
+-- (so it physically grabs us), anchor to the LOCAL throat (so an unrelated far junction
+-- that merely touches the line-long return rail can't be picked), and then prefer the
+-- route that LANDS ON the return chain over one that lands on a tail/siding.
+function DRIVER:PlanTurnback()
+    local head = self:GetHead()
+    if not (IsValid(head) and AI.ChainPos and Metrostroi.GetSwitchByName) then return nil end
+    local tp  = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
+    local pos = tp and tp[1]
+    if not (pos and pos.path) then return nil end
+    local ourCh    = AI.ChainPos(math.floor(tonumber(pos.path.id) or 0), pos.x or 0)
+    local returnCh = self:ReturnTrackChain()
+    local ref      = head:GetPos()
+    local dir      = isvector(self.travelDir) and self.travelDir or head:GetForward()
+
+    -- signal name -> chain it sits on
+    local byName = {}
+    for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
+        if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
+    end
+    local function chainOf(nm)
+        local sg = byName[nm or ""]
+        if not IsValid(sg) then return nil end
+        local t = sg.TrackPosition
+        if not (istable(t) and t.path) then return nil end
+        return (AI.ChainPos(math.floor(tonumber(t.path.id) or 0), t.x or 0))
+    end
+
+    -- candidate legs: every route that diverts our rail at a switch ahead of us
+    local maxFd = (TURNBACK_SCAN_M + 50) * U_PER_M
+    local cands, nearest = {}, nil
+    for _, sig in ipairs(ents.FindByClass("gmod_track_signal")) do
+        if IsValid(sig) and istable(sig.Routes) and sig:GetPos():Distance(ref) < maxFd then
+            for k, v in pairs(sig.Routes) do
+                if istable(v) and isstring(v.Switches) and v.Switches:find("%-") then
+                    local maxfd, divertFd
+                    for _, e in ipairs(string.Explode(",", v.Switches)) do
+                        if e ~= "" then
+                            local s = Metrostroi.GetSwitchByName(e:sub(1, -2))
+                            if IsValid(s) then
+                                local rel = s:GetPos() - ref
+                                local fd  = rel:Dot(dir)
+                                local lat = (rel - dir * fd):Length()
+                                if not maxfd or fd > maxfd then maxfd = fd end
+                                if e:sub(-1) == "-" and fd > -HALF_CAR and lat < TURNBACK_NEAR_U then
+                                    local a = math.abs(fd)
+                                    if not divertFd or a < divertFd then divertFd = a end
+                                end
+                            end
+                        end
+                    end
+                    if divertFd and maxfd and maxfd > -HALF_CAR then
+                        cands[#cands + 1] = { sig = sig, k = k, name = v.RouteName,
+                                              switches = v.Switches, divertFd = divertFd,
+                                              landCh = chainOf(v.NextSignal) }
+                        if not nearest or divertFd < nearest then nearest = divertFd end
+                    end
+                end
+            end
+        end
+    end
+
+    -- anchor to the local throat, then pick: lands on the RETURN chain (1e7) > leads to
+    -- some other real track, i.e. a tail to reverse on (1e6) > nearest entry.
+    local throat = (nearest or 0) + TURNBACK_DIAG_M * U_PER_M
+    local best, bestScore
+    for _, c in ipairs(cands) do
+        if c.divertFd <= throat then
+            local landsReturn = returnCh and c.landCh == returnCh or false
+            local real        = c.landCh ~= nil and c.landCh ~= ourCh
+            local score = (landsReturn and 1e7 or 0) + (real and 1e6 or 0) - c.divertFd / U_PER_M
+            if not bestScore or score > bestScore then best, bestScore = c, score end
+        end
+    end
+    if not best then self.tbPlanStr = "no turn-back crossover ahead"; return nil end
+    self.tbPlanStr = string.format("%s #%s '%s' sw=%s -> %s%s @%dm",
+        tostring(best.sig.Name), tostring(best.k), tostring(best.name or "?"), tostring(best.switches),
+        best.landCh and ("ch" .. best.landCh) or "stub",
+        (returnCh and best.landCh == returnCh) and " <<RETURN" or "",
+        math.Round(best.divertFd / U_PER_M))
+    return best
+end
+
+--------------------------------------------------------------------------------
+-- EXECUTION helpers
+--------------------------------------------------------------------------------
+-- Open a leg's route (OpenRoute lines EVERY switch it lists) and remember its switch
+-- set so we can hold it and detect when we've cleared it.
+function DRIVER:OpenLeg(leg)
+    if IsValid(leg.sig) and leg.sig.OpenRoute then pcall(leg.sig.OpenRoute, leg.sig, leg.k) end
+    leg.swList, leg.nextReopen = {}, 0
+    for _, e in ipairs(string.Explode(",", leg.switches or "")) do
+        if e ~= "" then
+            local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(e:sub(1, -2))
+            if IsValid(s) then leg.swList[#leg.swList + 1] = { sw = s, alt = (e:sub(-1) == "-") } end
+        end
+    end
+end
+
+-- Keep the leg lined while we thread it: re-assert each ALT switch still ahead of the
+-- tail (refreshing its 20 s auto-revert timer) and re-open the route periodically.
+function DRIVER:HoldLeg(leg, now)
+    if not (istable(self.wagons) and isvector(self.travelDir) and istable(leg.swList)) then return end
+    local tail = math.huge
+    for _, w in ipairs(self.wagons) do if IsValid(w) then tail = math.min(tail, w:GetPos():Dot(self.travelDir)) end end
+    local anyAhead = false
+    for _, it in ipairs(leg.swList) do
+        if IsValid(it.sw) and (it.sw:GetPos():Dot(self.travelDir) - tail) >= -HALF_CAR then
+            if it.alt then pcall(it.sw.SendSignal, it.sw, "alt", nil, true) end
+            anyAhead = true
+        end
+    end
+    if anyAhead and now >= (leg.nextReopen or 0) then
+        leg.nextReopen = now + 1.5
+        if IsValid(leg.sig) and leg.sig.OpenRoute then pcall(leg.sig.OpenRoute, leg.sig, leg.k) end
+    end
+end
+
+-- Has the WHOLE train cleared every switch the leg throws (with a 2-car margin)?
+function DRIVER:LegSwitchesCleared(leg)
+    if not (istable(self.wagons) and isvector(self.travelDir) and istable(leg.swList)) then return false end
+    if #leg.swList == 0 then return true end
+    local tail = math.huge
+    for _, w in ipairs(self.wagons) do if IsValid(w) then tail = math.min(tail, w:GetPos():Dot(self.travelDir)) end end
+    for _, it in ipairs(leg.swList) do
+        if IsValid(it.sw) and (it.sw:GetPos():Dot(self.travelDir) - tail) >= -HALF_CAR * 2 then return false end
+    end
+    return true
+end
+
+-- Begin the maneuver. Returns true if a plan was found and committed.
+function DRIVER:StartTurnback(now)
+    local leg = self:PlanTurnback()
+    if not leg then return false end
+    self.tb = { phase = "LEG1", leg = leg }
+    self.servedIsTerminus = nil
+    self:OpenLeg(leg)
+    self:SetStatus("TURNBACK: " .. tostring(self.tbPlanStr))
+    return true
+end
+
+--------------------------------------------------------------------------------
+-- The state machine (owns the train completely while self.tb is set)
+--------------------------------------------------------------------------------
+function DRIVER:TurnbackThink(now, dt, speed)
+    local tb    = self.tb
+    local crawl = AI.CVars.turnback_speed and AI.CVars.turnback_speed:GetFloat() or 25
+
+    -- Hold after a reverse, then either finish (we're on the return track) or run leg 2.
+    if tb.phase == "REVERSE" then
+        self:ApplyDrive(0, AI.HOLD_BRAKE)
+        self:SetStatus("TURNBACK reverse")
+        if now >= (tb.holdUntil or 0) then
+            if self:OnReturnTrack() then
+                self.tb = nil                                   -- direct crossover: done
+            else
+                local leg = self:PlanTurnback()                 -- re-plan the come-back leg
+                if leg then tb.leg = leg; tb.phase = "LEG2"; self:OpenLeg(leg)
+                else self.tb = nil end                          -- one reversal only: stop cleanly
+            end
+        end
+        return
+    end
+
+    -- LEG1 / LEG2 : drive the crossover.
+    local leg = tb.leg
+    self:HoldLeg(leg, now)
+
+    -- LEG2 complete: back on the return line and clear of the points.
+    if tb.phase == "LEG2" and self:OnReturnTrack() and self:LegSwitchesCleared(leg) then
+        self.tb = nil; self:SetStatus("TURNBACK done"); return
+    end
+
+    -- Fully across the points -> reverse. A direct plan leaves us on the return track
+    -- (REVERSE then finishes); a tail plan reverses on the tail and re-plans leg 2.
+    if self:LegSwitchesCleared(leg) then
+        self:FlipDirection(now)
+        tb.phase, tb.holdUntil = "REVERSE", now + 5
+        self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TURNBACK reverse"); return
+    end
+
+    -- Still threading: crawl, but pull up short of a buffer/blocked end and reverse there
+    -- (a dead pull-track stub we can't drive off the end of).
+    local endM = self:TrackEndAhead(PROBE_M)
+    if endM then
+        local aim = endM - TERMINUS_BUFFER
+        if speed <= ARRIVE_SPEED and aim <= 1.2 then
+            self:FlipDirection(now)
+            tb.phase, tb.holdUntil = "REVERSE", now + 5
+            self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TURNBACK reverse"); return
+        end
+        local vms  = speed / 3.6
+        local need = (aim > 0.05) and (vms * vms) / (2 * aim) or 99
+        self:ApplyDrive(0, math.Clamp(need * BRAKE_PER_MS2 * 1.3, 0.6, 6))
+        self:SetStatus(string.format("TURNBACK %s (rail %dm)", tb.phase, math.Round(endM)))
+        return
+    end
+
+    self:Drive(crawl, speed, dt)
+    self:SetStatus("TURNBACK " .. tb.phase)
+end

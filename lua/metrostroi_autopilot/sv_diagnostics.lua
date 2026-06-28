@@ -146,29 +146,29 @@ function AI.CmdTermDebug(ply)
     local tp  = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
     local pos = tp and tp[1]
     local term = pos and drv:TerminusDistance(pos)
-    local thrown = "-"
-    if drv.turnbackSwitches and #drv.turnbackSwitches > 0 then
-        local ids = {}
-        for _, sw in ipairs(drv.turnbackSwitches) do
-            if IsValid(sw) then ids[#ids + 1] = sw:GetNW2String("ID", "?") end
-        end
-        thrown = table.concat(ids, "+")
-    end
-    line(string.format("state=%s  term=%s  turnback=%s",
+    line(string.format("state=%s  term=%s  turnback phase=%s",
         tostring(drv.state),
         term and (string.format("%.0f m to buffer", term)) or "none (track continues / loop)",
-        thrown))
+        (drv.tb and drv.tb.phase) or "-"))
     line("  terminus probe (path end): " .. tostring(drv.termWhy))
     drv:TrackEndAhead(200)
     line("  end-of-track scan: " .. tostring(drv.trackEndWhy))
-    if drv.turnbackPick then line("  turnback pick: " .. drv.turnbackPick) end
-    if drv.turnbackRoute then line("  turnback route: " .. drv.turnbackRoute) end
-    if drv.turnbackSwitches and #drv.turnbackSwitches > 0 then
-        local st = {}
-        for _, sw in ipairs(drv.turnbackSwitches) do
-            if IsValid(sw) then st[#st + 1] = sw:GetNW2String("ID", "?") .. (sw.AlternateTrack and "=ALT" or "=main") end
+    local tb = drv.tb
+    if tb then
+        line("  turnback EXECUTING: " .. tostring(drv.tbPlanStr))
+        if tb.leg and istable(tb.leg.swList) and #tb.leg.swList > 0 then
+            local st = {}
+            for _, it in ipairs(tb.leg.swList) do
+                if IsValid(it.sw) then st[#st + 1] = it.sw:GetNW2String("ID", "?") ..
+                    (it.sw.AlternateTrack and "=ALT" or "=main") end
+            end
+            line("  leg switches: " .. table.concat(st, "  "))
         end
-        line("  turnback switches held: " .. table.concat(st, "  "))
+    else
+        -- not in a maneuver: recompute the plan the engine WOULD commit to right here, so
+        -- we can verify the pick (e.g. the KR scissors -> chain2, not the AK depot).
+        if drv.PlanTurnback then drv:PlanTurnback() end
+        line("  turnback PLAN (if started here): " .. tostring(drv.tbPlanStr))
     end
     line("  recently reversed near here: " .. tostring(drv:RecentlyReversedNear(CurTime())))
     -- What platform (if any) the driver is currently locked onto - the prime

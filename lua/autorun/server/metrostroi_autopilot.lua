@@ -93,6 +93,7 @@ end
 include("metrostroi_autopilot/sv_driver.lua")
 include("metrostroi_autopilot/sv_lookahead.lua")   -- DRIVER methods: ARS, signals, curves, trains ahead
 include("metrostroi_autopilot/sv_stations.lua")    -- DRIVER methods: platforms, terminus, doors
+include("metrostroi_autopilot/sv_turnback.lua")    -- DRIVER methods: terminus turn-back engine (plan + execute)
 include("metrostroi_autopilot/sv_regulation.lua")
 include("metrostroi_autopilot/sv_util.lua")        -- shared command/map helpers (AI.*)
 include("metrostroi_autopilot/sv_commands.lua")    -- player console & chat commands

@@ -277,7 +277,6 @@ function DRIVER:Think(now)
     if not IsValid(head) then return end
     self:UpdateReverser()                  -- keep reverser matched to travel direction
     self:SuppressSafetyVent()              -- stop the autostop bleeding the brake line
-    self:MaintainTurnback()                -- hold the turn-back crossover until we're past it
     local speed = self:GetSpeed()          -- km/h (absolute, from the bogeys)
 
     -- Hold states (dwelling at a station / pausing to reverse)
@@ -288,20 +287,9 @@ function DRIVER:Think(now)
                 self:SetStatus("REGULATING " .. (IsValid(self.servedPlatform) and (self.servedPlatform.StationIndex or "") or ""))
                 return                                 -- keep doors open, hold for regulation
             end
-            if self.state == "DWELL" then
-                self:CloseDoors()
-                -- Terminus station (the map's PA marker flags it) with the crossover
-                -- AT the platform (no tail track): turn back right here. If there's a
-                -- deadlock tail track, the crossover is up the throat - so we DON'T
-                -- reverse here; we run on into the tail and turn back there instead.
-                if self.servedIsTerminus and not self.servedDeadlock
-                   and AI.CVars.terminus_rev:GetInt() == 1
-                   and not self:RecentlyReversedNear(now) then
-                    self.servedIsTerminus = nil
-                    self:BeginReverse(now)
-                    return
-                end
-            end
+            -- After dwelling at a terminus we leave self.servedIsTerminus set: the DRIVE-
+            -- phase trigger below starts the turn-back engine as we pull away.
+            if self.state == "DWELL" then self:CloseDoors() end
             self.state = "DRIVE"
             self.stuckTime, self.hasMoved = 0, false   -- grace period after a stop
         end
@@ -313,6 +301,9 @@ function DRIVER:Think(now)
     local dir = Metrostroi.TrainDirections and Metrostroi.TrainDirections[head]
     self:UpdateARS(pos, dir, now)                      -- refresh the governing ARS signal
     self:UpdateRoutePos(pos)                           -- track position along the route (for ahead-checks)
+
+    -- TURN-BACK ENGINE owns the train while a maneuver is in progress (sv_turnback.lua).
+    if self.tb then self:TurnbackThink(now, dt, speed); return end
 
     -- Build the target speed from every limit. The ARS code IS the AUTHORISED max
     -- wherever the track sends one; cruise is ONLY the fallback for un-coded track
@@ -340,33 +331,16 @@ function DRIVER:Think(now)
     local pf = self:NextPlatform()
     local platAim = pf and (self:ForwardDist(self:PlatformStopPoint(pf)) / AI.U_PER_M - PLATFORM_STOP_OFFSET)
 
-    -- Approaching a terminus with nothing to serve: line the turn-back crossover
-    -- EARLY, while we're still well short of the points - so they're clear of the
-    -- train and can actually throw, and we divert across the scissors instead of
-    -- arriving on top of switches that then refuse. Fires as soon as a buffer is in
-    -- range (coded track or throat); OnReturnTrack stops it once we've crossed over.
+    -- TURN-BACK trigger: a terminus ahead with nothing left to serve - either the map's
+    -- PA marker flagged the station we just served as the last one, or the rail simply
+    -- ends ahead. Plan and start the cross -> reverse -> return maneuver; from here the
+    -- engine (self.tb) owns the train. If there is no crossover route at all, StartTurnback
+    -- returns false and the end-of-track block below stops & reverses on the spot.
     if AI.CVars.terminus_rev:GetInt() == 1 and not pf and not self.arsReverseCooldown
-       and not self:RecentlyReversedNear(now) and now >= (self.nextApproachRoute or 0) then
-        if self:TrackEndAhead(240) and not self:OnReturnTrack() then
-            self.nextApproachRoute = now + 1.0
-            self:OpenTurnbackRoute()
-        end
-    end
-
-    -- Crossed the turn-back scissors and landed on a TAIL / depot lead (NOT the return
-    -- track): turn back right here, the moment we're clear of the points, and come back
-    -- through the OTHER diagonal onto the return track. A non-return lead is a pull-track
-    -- or a depot throat - we must NOT drive on into it: its protecting signal is closed
-    -- (and unreliably detected from inside the throat), and the deeper we go the farther
-    -- the return crossover falls behind us, until the come-back leg can't even line it. A
-    -- direct-crossover terminus instead lands straight on the RETURN track, so OnReturnTrack
-    -- is true, this is skipped, and the train runs on to the buffer where the ordinary
-    -- end-of-track turn-back reverses it - that's the "end of track" half of the maneuver,
-    -- this is the "blocked / depot lead" half.
-    if self.turnbackCrossed and self.turnbackRouteRef and not self:OnReturnTrack()
-       and AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then
-        self:BeginReverse(now)
-        return
+       and not self:RecentlyReversedNear(now) and now >= (self.nextTbTry or 0)
+       and (self.servedIsTerminus or self:TrackEndAhead(240)) then
+        self.nextTbTry = now + 0.5
+        if self:StartTurnback(now) then return end
     end
 
     -- HARD STOP for a red signal / train ahead, using the same precise distance
@@ -399,20 +373,18 @@ function DRIVER:Think(now)
     -- of the buffer, and a turn-back through the crossover behind us. If the rail
     -- still runs ahead (a transient or mid-line ARS dropout), we do nothing, so a
     -- blip can never brake or reverse the train. The cooldown (cleared on re-
-    -- acquiring a code, set by BeginReverse) lets the reversed train drive back off
-    -- the un-coded stub instead of instantly re-detecting the end behind it.
-    -- While committed to a turn-back route and still threading the crossover, the
-    -- only thing allowed to reverse us is the "fully crossed" trigger above - NOT the
-    -- end-of-track detector, which false-fires on the sharp scissors S-curve and would
-    -- stop us dead on the points and bounce us back the way we came.
-    local crossingTurnback = self.turnbackRouteRef and not self.turnbackCrossed
-    if self:ARSLost(now) and not pf and not self.arsReverseCooldown and not crossingTurnback then
+    -- acquiring a code, set by FlipDirection) lets the reversed train drive back off
+    -- the un-coded stub instead of instantly re-detecting the end behind it. This is the
+    -- FALLBACK path: it only runs when no turn-back crossover route was found (the engine
+    -- already returned above when self.tb is set), so here we just stop at the buffer and
+    -- reverse on the spot (a plain stub terminus).
+    if self:ARSLost(now) and not pf and not self.arsReverseCooldown then
         local endM = self:TrackEndAhead(200)
         if endM then
             local aim = endM - TERMINUS_BUFFER
             if speed <= ARRIVE_SPEED and aim <= 1.2 then
                 if AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then
-                    self:BeginReverse(now)
+                    self:SimpleReverse(now)
                 else
                     self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TERMINUS (rail ends)")
                 end
@@ -467,12 +439,12 @@ function DRIVER:Think(now)
     -- End of track: pull into the tail track and stop precisely short of the
     -- buffer (same distance-based feedforward as the platform stop, so we never
     -- nose into the wall), then turn the train back.
-    if term and not crossingTurnback then
+    if term then
         status = "TERMINUS"
         local aim  = term - TERMINUS_BUFFER
         local sdec = math.max(0.2, AI.CVars.station_decel:GetFloat())
         if speed <= ARRIVE_SPEED and aim <= 1.2 then
-            if AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then self:BeginReverse(now)
+            if AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then self:SimpleReverse(now)
             else self:ApplyDrive(0, AI.HOLD_BRAKE) end
             return
         end
@@ -503,7 +475,7 @@ function DRIVER:Think(now)
         if AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then
             self.stuckTime, self.hasMoved = 0, false
             status = "TERMINUS"
-            self:BeginReverse(now)
+            self:SimpleReverse(now)
             return
         end
         -- Stuck again right after a turn-back nearby: that's the dead-end <-> failed-
@@ -515,14 +487,6 @@ function DRIVER:Think(now)
     end
 
     if self.holdSignal and speed <= ARRIVE_SPEED then status = "HELD AT SIGNAL" end
-
-    -- Crawl through the turn-back points. A scissors taken at line speed derails the
-    -- bogeys on the diverging frogs (the switches are set right, but we were charging
-    -- through at 40), so cap the speed while a turn-back route is committed / held.
-    if self.turnbackRouteRef or (self.turnbackSwitches and #self.turnbackSwitches > 0) then
-        target = math.min(target, AI.CVars.turnback_speed and AI.CVars.turnback_speed:GetFloat() or 12)
-        if status == "DRIVE" then status = "TURNBACK" end
-    end
 
     -- Drive toward the target speed
     self:Drive(target, speed, dt)

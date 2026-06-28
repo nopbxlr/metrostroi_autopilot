@@ -38,7 +38,7 @@ function DRIVER:UpdateARS(pos, dir, now)
     -- the un-coded dead-end stub past a terminus is exactly that. We only ARM
     -- this once we've genuinely seen a code, so a fully un-coded map (no ARS
     -- network) still uses the cruise fallback and drives normally. Re-acquiring a
-    -- code clears the loss (and the post-reverse suppression set by BeginReverse).
+    -- code clears the loss (and the post-reverse suppression set by FlipDirection).
     if type(self.arsSpeed) == "number" then
         self.arsEverSeen        = true
         self.arsLostAt          = nil
