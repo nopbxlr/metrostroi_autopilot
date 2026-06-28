@@ -288,7 +288,18 @@ function DRIVER:Think(now)
                 self:SetStatus("REGULATING " .. (IsValid(self.servedPlatform) and (self.servedPlatform.StationIndex or "") or ""))
                 return                                 -- keep doors open, hold for regulation
             end
-            if self.state == "DWELL" then self:CloseDoors() end
+            if self.state == "DWELL" then
+                self:CloseDoors()
+                -- Terminus station (the map's PA marker flags it): turn back here
+                -- rather than departing forward toward the dead end. The crossover
+                -- route logic lines the points; anti-oscillation guards a re-flip.
+                if self.servedIsTerminus and AI.CVars.terminus_rev:GetInt() == 1
+                   and not self:RecentlyReversedNear(now) then
+                    self.servedIsTerminus = nil
+                    self:BeginReverse(now)
+                    return
+                end
+            end
             self.state = "DRIVE"
             self.stuckTime, self.hasMoved = 0, false   -- grace period after a stop
         end

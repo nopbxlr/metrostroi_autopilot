@@ -182,6 +182,9 @@ function AI.CmdTermDebug(ply)
         line(string.format("nextPlatform: station %s  farFd=%+.0fm  lateral=%.0fu  stop=%s",
             tostring(pf.StationIndex or "?"), farFd, drv:LateralDist(center),
             drv:PAStopFor(pf) and "PA marker" or "platform end"))
+        local pa = drv:PAInfoFor(pf)
+        if pa then line(string.format("  PA marker: terminus=%s  doors=%s  name=%s",
+            tostring(pa.isLast), pa.rightDoors and "RIGHT" or "LEFT", tostring(pa.name or "?"))) end
     else
         line("nextPlatform: none")
     end

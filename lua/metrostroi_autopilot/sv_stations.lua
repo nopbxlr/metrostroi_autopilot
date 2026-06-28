@@ -32,7 +32,7 @@ function AI.BuildPAStops()
             table.insert(map[sid], {
                 pos        = wpos or m:GetPos(),
                 isLast     = m.PALastStation and true or false,
-                rightDoors = m.PAStationRightDoors,
+                rightDoors = (m.PAStationRightDoors == true) or (tonumber(m.PAStationRightDoors) == 1),
                 name       = m.PAStationName,
             })
         end
@@ -92,10 +92,10 @@ function DRIVER:PlatformStopPoint(pf)
     return (self:ForwardDist(a) > self:ForwardDist(b)) and a or b
 end
 
--- The authored PA stop point for this platform's station, or nil. Sanity-gated to
--- a marker sitting within the platform (+ ~11 m margin) so a mis-tagged marker on
--- another track can never strand the train short of / past its platform.
-function DRIVER:PAStopFor(pf)
+-- The best-matching PA station record for this platform (stop pos / terminus flag
+-- / door side), or nil. Sanity-gated to a marker sitting within the platform (+
+-- ~11 m margin) so a mis-tagged marker on another track can't mislead us.
+function DRIVER:PAInfoFor(pf)
     if not (IsValid(pf) and pf.StationIndex and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd)) then return nil end
     local map  = AI.EnsurePAStops and AI.EnsurePAStops()
     local list = map and map[pf.StationIndex]
@@ -109,7 +109,12 @@ function DRIVER:PAStopFor(pf)
             if d < maxOff and (not bestD or d < bestD) then best, bestD = s, d end
         end
     end
-    return best and best.pos or nil
+    return best
+end
+
+function DRIVER:PAStopFor(pf)
+    local r = self:PAInfoFor(pf)
+    return r and r.pos or nil
 end
 
 function DRIVER:BeginStationStop(now, pf)
@@ -117,6 +122,8 @@ function DRIVER:BeginStationStop(now, pf)
     self.holdUntil = now + math.max(2, AI.CVars.dwell:GetFloat())
     self.dwellStart = now
     self.servedPlatform = pf
+    local info = self:PAInfoFor(pf)
+    self.servedIsTerminus = info and info.isLast or false   -- map flags this as the last station
     self:ApplyDrive(0, AI.HOLD_BRAKE)
     if AI.CVars.open_doors:GetInt() == 1 then self:OpenDoors(pf) end
     hook.Run("MetrostroiAI.StationStop", self, pf)
@@ -356,14 +363,26 @@ function DRIVER:OpenDoors(pf)
     if not self.profile then return end
     local h = self.head
     if not IsValid(h) then return end
-    local center = (pf.PlatformStart + pf.PlatformEnd) * 0.5
     -- Decide the platform side ONCE, in the head's frame, and command that SAME
     -- side on every car. The door commands feed train-wide wires 31 (left) / 32
     -- (right); a per-car side meant cars facing opposite ways drove BOTH wires hot,
     -- and VDOL+VDOP energised together is the CLOSE command - so the doors locked
     -- shut and never opened. One side -> one wire -> they open.
     local hRight = h:GetForward():Cross(Vector(0, 0, 1))
-    local side = ((center - h:GetPos()):Dot(hRight) > 0) and "right" or "left"
+    local side
+    local info = self:PAInfoFor(pf)
+    if info then
+        -- PREFER the map's authored side. PAStationRightDoors is the train's RIGHT
+        -- in the travel frame (sv: rightDoors -> "DP"/right, else "DL"/left); map
+        -- it into the head's frame so it survives a reversed cab.
+        local tRight = (isvector(self.travelDir) and self.travelDir or h:GetForward()):Cross(Vector(0, 0, 1))
+        local phys   = info.rightDoors and tRight or (tRight * -1)
+        side = (phys:Dot(hRight) > 0) and "right" or "left"
+    else
+        -- geometric fallback (unchanged): whichever side the platform is on
+        local center = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+        side = ((center - h:GetPos()):Dot(hRight) > 0) and "right" or "left"
+    end
     for _, w in ipairs(self.wagons) do
         if IsValid(w) then self.profile.OpenDoor(w, side) end
     end
