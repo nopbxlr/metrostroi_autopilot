@@ -274,6 +274,16 @@ function DRIVER:LegSwitchesSet(leg)
     return true
 end
 
+-- Is the route's OWN signal holding us at stop? The interlocking drops a signal to stop for
+-- an occupied/conflicting block ahead - the authoritative "do not proceed". We read the same
+-- flags the driver's SignalStop uses, MINUS ARSSpeedLimit (a turn-back throat is often un-
+-- coded, so code 0 there means "no ARS", not "red"). Occupied/Close/KGU are explicit stops.
+function DRIVER:LegSignalAtStop(leg)
+    local s = leg.sig
+    if not IsValid(s) then return false end
+    return (s.Occupied == true) or (s.Close == true) or (s.KGU == true)
+end
+
 -- Is another train standing on/near the crossover we're about to take? (any wagon that
 -- isn't ours within ~30 m of a leg switch). Don't line/cross a throat onto another train.
 function DRIVER:ThroatOccupied(leg)
@@ -374,12 +384,15 @@ function DRIVER:TurnbackThink(now, dt, speed)
     -- crossover ahead is clear of any other train. One-time per leg (once moving we don't
     -- re-check, or our own train on the points would read as "occupied").
     if not leg.ready then
-        local occupied = self:ThroatOccupied(leg)
-        if now >= (leg.openedAt or 0) + LEG_SETTLE and self:LegSwitchesSet(leg) and not occupied then
+        local stopSig = self:LegSignalAtStop(leg)                 -- interlocking says: do not proceed
+        local blocked = stopSig or self:ThroatOccupied(leg)       -- + a physical wagon on the points
+        if now >= (leg.openedAt or 0) + LEG_SETTLE and self:LegSwitchesSet(leg) and not blocked then
             leg.ready = true
         else
             self:ApplyDrive(0, AI.HOLD_BRAKE)
-            self:SetStatus("TURNBACK " .. tb.phase .. (occupied and " (throat occupied - waiting)" or " (lining route)"))
+            self:SetStatus("TURNBACK " .. tb.phase .. (blocked
+                and (stopSig and " (signal at stop - waiting)" or " (throat occupied - waiting)")
+                or " (lining route)"))
             return
         end
     end
