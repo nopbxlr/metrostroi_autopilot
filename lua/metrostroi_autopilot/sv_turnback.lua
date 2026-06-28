@@ -29,8 +29,10 @@ local ARRIVE_SPEED, TERMINUS_BUFFER = C.ARRIVE_SPEED, C.TERMINUS_BUFFER
 local PROBE_M    = 220   -- how far ahead to watch for the buffer while crawling a leg
 local CLOSE_END_M = 45   -- only a buffer THIS close (a dead-end stub) stops a leg; a farther
                          -- one is past where the crossover diverts us, so it must not brake us
-local THROAT_M   = 180   -- a turn-back crossover's first switch is within this of us; farther
-                         -- means an unrelated junction that merely touches the return rail
+local THROAT_M   = 280   -- a turn-back crossover's first switch is within this of us. Wide
+                         -- enough to see the running-line scissors PAST a depot throat (so we
+                         -- prefer the direct chain1->chain2 move over diverting into the
+                         -- depot), but not so wide we pull in an unrelated far junction.
 
 -- The mechanical reverse: flip the travel sense so the bogeys drive the other way.
 -- No switch throwing here - the turn-back engine lines switches via routes only.
