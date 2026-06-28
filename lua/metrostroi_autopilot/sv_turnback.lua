@@ -152,9 +152,35 @@ function DRIVER:PlanTurnback()
         return nil
     end
 
+    -- Two routes with the SAME switch list are the SAME physical move, just written on
+    -- different signals. AK1 'AK3-1' and RCAK7 #2 are both "AK5+,AK3+,AK1-": one's NextSignal
+    -- is a dead-end (AKFIX1 -> *), the other's chains to the return (AKG -> ch2). So judge
+    -- "does this move reach the return?" by the switch SET - if ANY route throwing this exact
+    -- set chains to the return, the set does. (And remember whether any such route is NAMED,
+    -- so we can prefer the dispatcher's move over an unnamed twin that picks a derailing
+    -- diagonal.) Built once over all routes.
+    local function switchKey(sw)
+        local t = string.Explode(",", sw or "")
+        table.sort(t)
+        return table.concat(t, ",")
+    end
+    local setReaches, setNamed = {}, {}
+    for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
+        if IsValid(sg) and istable(sg.Routes) then
+            for _, r in pairs(sg.Routes) do
+                if istable(r) and isstring(r.Switches) and r.Switches:find("%-") then
+                    local key = switchKey(r.Switches)
+                    if hopsToReturn(r.NextSignal) ~= nil then setReaches[key] = true end
+                    if r.RouteName ~= nil and r.RouteName ~= "" then setNamed[key] = true end
+                end
+            end
+        end
+    end
+    local function reachesReturn(sw) return setReaches[switchKey(sw)] == true end
+
     -- Does a tail chain T reach the RETURN track in ONE more leg (after we reverse onto it)?
-    -- A route on a signal sitting on T whose chain reaches the return. Tells the AK sawtooth's
-    -- ch4 tail (AK1 'AK3-1' -> ... -> ch2) from the ch3 depot dead-end. Cached per tail.
+    -- A route on a signal sitting on T whose switch set reaches the return. Tells the AK
+    -- sawtooth's ch4 tail (AK1 'AK3-1' -> ch2) from the ch3 depot dead-end. Cached per tail.
     local tailCache = {}
     local function tailReachesReturn(T)
         if not (T and returnCh) then return false end
@@ -162,9 +188,9 @@ function DRIVER:PlanTurnback()
         tailCache[T] = false
         for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
             if IsValid(sg) and istable(sg.Routes) and chainOf(sg.Name) == T then
-                for _, r in ipairs(sg.Routes) do
+                for _, r in pairs(sg.Routes) do
                     if istable(r) and isstring(r.Switches) and r.Switches:find("%-")
-                       and hopsToReturn(r.NextSignal) ~= nil then tailCache[T] = true; break end
+                       and reachesReturn(r.Switches) then tailCache[T] = true; break end
                 end
             end
             if tailCache[T] then break end
@@ -183,13 +209,18 @@ function DRIVER:PlanTurnback()
     local best, bestScore
     for _, c in ipairs(cands) do
         if c.divertFd <= THROAT_M * U_PER_M then
-            local h       = hopsToReturn(c.nextSig)
-            local direct  = h ~= nil
+            local direct  = reachesReturn(c.switches)               -- by switch SET, not NextSignal
             local real    = c.landCh ~= nil and c.landCh ~= ourCh
             local viaTail = (not direct) and real and tailReachesReturn(c.landCh) or false
             local kind    = direct and 3 or (viaTail and 2 or (real and 1 or 0))
-            local named   = c.name ~= nil and c.name ~= ""
-            local score = kind * 1e7 + (named and 1e5 or 0) - (h or 0) * 1e3 - c.divertFd / U_PER_M
+            -- "named" = this MOVE (switch set) is a route a dispatcher would !sopen, even if
+            -- THIS particular signal's copy of it is unnamed. So the correct AK5+,AK3+,AK1-
+            -- move (named 'AK3-1' on AK1) is preferred over the unnamed RCAK7 twin that
+            -- diverts AK3- and derails.
+            local named   = setNamed[switchKey(c.switches)] == true
+            local h       = hopsToReturn(c.nextSig)                 -- display / tie-break only
+            local thisNamed = c.name ~= nil and c.name ~= "" and 1 or 0  -- show the named copy
+            local score = kind * 1e7 + (named and 1e5 or 0) + thisNamed - (h or 0) * 1e3 - c.divertFd / U_PER_M
             if not bestScore or score > bestScore then best, bestScore, c.kind, c.hops = c, score, kind, h end
         end
     end
