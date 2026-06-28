@@ -157,8 +157,10 @@ function AI.CmdHelp(ply)
         "  metrostroi_ai_add            - make the train you aim at drive itself",
         "  metrostroi_ai_spawn C N      - spawn an N-car AI train of class C on the track you aim at",
         "  metrostroi_ai_remove [all]   - stop AI on the aimed train (or 'all')",
-        "  metrostroi_ai_list           - list active AI trains",
-        "  chat: !ai  |  !ai spawn 717 4  |  !ai remove [all]  |  !ai list",
+        "  metrostroi_ai_status         - where every train (AI + manual) is",
+        "  metrostroi_ai_tp <#>         - board an AI train's forward cab",
+        "  metrostroi_ai_map            - open the track-network map window",
+        "  chat: !ai  |  !ai spawn 717 4  |  !ai status  |  !ai tp 2  |  !ai map",
         "  tuning cvars: metrostroi_ai_cruise_speed, _dwell, _decel, _accel, _obey_signals ...",
     }
     for _, line in ipairs(L) do tell(ply, line) end
@@ -352,9 +354,131 @@ function AI.CmdTermDebug(ply)
     if n == 0 then line("  no switches within ~450 m either direction (single-track / stub terminus?)") end
 end
 
+-- Stable-ordered list of AI drivers (by lead EntIndex) so "#n" means the same
+-- train across !ai status and !ai tp.
+local function orderedDrivers()
+    local list = {}
+    for lead, drv in pairs(AI.Drivers) do
+        if IsValid(lead) then list[#list + 1] = drv end
+    end
+    table.sort(list, function(a, b)
+        return (IsValid(a.lead) and a.lead:EntIndex() or 0) < (IsValid(b.lead) and b.lead:EntIndex() or 0)
+    end)
+    return list
+end
+
+local function bogeySpeed(w)
+    local b = (IsValid(w.FrontBogey) and w.FrontBogey) or (IsValid(w.RearBogey) and w.RearBogey)
+    return math.Round((IsValid(b) and b.Speed) or w.Speed or 0)
+end
+
+-- Nearest platform/station to a world position -> (stationIndex, distance_m).
+local function nearStation(pos)
+    local best, bd
+    for _, pf in ipairs(ents.FindByClass("gmod_track_platform")) do
+        if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
+            local c = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+            local d = c:DistToSqr(pos)
+            if not bd or d < bd then bd, best = d, pf end
+        end
+    end
+    if best then return tostring(best.StationIndex or "?"), math.sqrt(bd) / AI.U_PER_M end
+    return "?", 0
+end
+
+-- The driver seat that faces our travel direction (the forward cab), for !ai tp.
+local function forwardSeat(drv)
+    local best, bestAlong
+    for _, w in ipairs(drv.wagons or {}) do
+        if IsValid(w) and IsValid(w.DriverSeat) and isvector(drv.travelDir)
+           and w:GetForward():Dot(drv.travelDir) > 0 then
+            local along = w:GetPos():Dot(drv.travelDir)
+            if not bestAlong or along > bestAlong then best, bestAlong = w.DriverSeat, along end
+        end
+    end
+    if not best then            -- fallback: any driver seat in the consist
+        for _, w in ipairs(drv.wagons or {}) do
+            if IsValid(w) and IsValid(w.DriverSeat) then best = w.DriverSeat break end
+        end
+    end
+    return best
+end
+
+-- Overview of EVERY train on the map: AI ones numbered for !ai tp, plus manual.
+function AI.CmdStatus(ply)
+    local function line(s)
+        if IsValid(ply) then ply:PrintMessage(HUD_PRINTCONSOLE, "[AI] " .. s .. "\n") end
+        tell(ply, s)
+    end
+    local drivers = orderedDrivers()
+    line("=== AI trains (" .. #drivers .. ") - !ai tp <#> to board ===")
+    for i, drv in ipairs(drivers) do
+        local lead = IsValid(drv.head) and drv.head or drv.lead
+        if IsValid(lead) then
+            local st, dist = nearStation(lead:GetPos())
+            line(string.format("#%d  %s  x%d  %d km/h  %s  @st.%s (%dm)",
+                i, lead:GetClass():gsub("^gmod_subway_", ""), #(drv.wagons or {}),
+                bogeySpeed(lead), tostring(drv.state or "?"), st, math.Round(dist)))
+        end
+    end
+
+    -- Manual trains: spawned consists with no car under AI control.
+    local aiWag = {}
+    for _, drv in ipairs(drivers) do
+        for _, w in ipairs(drv.wagons or {}) do aiWag[w] = true end
+    end
+    local seen, manual = {}, 0
+    for t in pairs(Metrostroi.SpawnedTrains or {}) do
+        if IsValid(t) and not seen[t] then
+            local cars = {}
+            if istable(t.WagonList) then
+                for _, w in pairs(t.WagonList) do if IsValid(w) then cars[#cars + 1] = w; seen[w] = true end end
+            end
+            if #cars == 0 then cars = { t }; seen[t] = true end
+            local isAI = false
+            for _, w in ipairs(cars) do if aiWag[w] then isAI = true break end end
+            if not isAI then
+                manual = manual + 1
+                local st, dist = nearStation(cars[1]:GetPos())
+                line(string.format("(manual)  %s  x%d  %d km/h  @st.%s (%dm)",
+                    cars[1]:GetClass():gsub("^gmod_subway_", ""), #cars, bogeySpeed(cars[1]), st, math.Round(dist)))
+            end
+        end
+    end
+    if manual == 0 then line("(no manual trains)") end
+end
+
+-- Board an AI train's forward driver seat (nearest one if no number given).
+function AI.CmdTeleport(ply, args)
+    if not IsValid(ply) then return tell(ply, "run this in-game.") end
+    if not canUse(ply) then return tell(ply, "admins only.") end
+    local drivers = orderedDrivers()
+    local n = tonumber(args and args[1])
+    if not n then                          -- no number -> nearest AI train
+        local bd
+        for i, drv in ipairs(drivers) do
+            local lead = IsValid(drv.head) and drv.head or drv.lead
+            if IsValid(lead) then
+                local d = lead:GetPos():DistToSqr(ply:GetPos())
+                if not bd or d < bd then bd, n = d, i end
+            end
+        end
+    end
+    local drv = n and drivers[n]
+    if not drv then return tell(ply, "no AI train #" .. tostring(n) .. " - try !ai status.") end
+    local seat = forwardSeat(drv)
+    if not IsValid(seat) then return tell(ply, "that train has no usable driver seat.") end
+    if IsValid(seat:GetDriver()) then return tell(ply, "the forward cab is occupied.") end
+    if IsValid(ply:GetVehicle()) then ply:ExitVehicle() end
+    ply:EnterVehicle(seat)
+    tell(ply, "boarded AI train #" .. n .. " (forward cab).")
+end
+
 --------------------------------------------------------------------------------
 -- Register console commands
 --------------------------------------------------------------------------------
+concommand.Add("metrostroi_ai_status", function(ply) AI.CmdStatus(ply) end)
+concommand.Add("metrostroi_ai_tp",     function(ply, _, a) AI.CmdTeleport(ply, a) end)
 concommand.Add("metrostroi_ai_termdebug", function(ply) AI.CmdTermDebug(ply) end)
 concommand.Add("metrostroi_ai_add",    function(ply) AI.CmdAdd(ply) end)
 concommand.Add("metrostroi_ai_arsdebug", function(ply) AI.CmdArsDebug(ply) end)
@@ -382,8 +506,207 @@ hook.Add("PlayerSay", "MetrostroiAI.Chat", function(ply, text)
     elseif sub == "ars" then AI.CmdArsDebug(ply)
     elseif sub == "doors" or sub == "door" then AI.CmdDoorDebug(ply)
     elseif sub == "term" or sub == "terminus" then AI.CmdTermDebug(ply)
+    elseif sub == "status" or sub == "where" then AI.CmdStatus(ply)
+    elseif sub == "tp" or sub == "goto" or sub == "board" then AI.CmdTeleport(ply, { parts[3] })
+    elseif sub == "map" then if IsValid(ply) then net.Start("MetrostroiAI_OpenMap") net.Send(ply) end
     elseif sub == "list" then AI.CmdList(ply)
     elseif sub == "help" then AI.CmdHelp(ply)
     else AI.CmdHelp(ply) end
     return ""
+end)
+
+--------------------------------------------------------------------------------
+-- Track-network map: serve the rail geometry (decimated XY per path) on request,
+-- and the live train positions for the client map window.
+--------------------------------------------------------------------------------
+util.AddNetworkString("MetrostroiAI_Map")
+util.AddNetworkString("MetrostroiAI_Schematic")
+util.AddNetworkString("MetrostroiAI_Trains")
+util.AddNetworkString("MetrostroiAI_OpenMap")
+
+local function netPos(w)
+    local tp = Metrostroi.TrainPositions and Metrostroi.TrainPositions[w]
+    local p = tp and tp[1]
+    if p and p.path then return math.Clamp(math.floor(tonumber(p.path.id) or 0), 0, 65535), p.x or 0 end
+    return 0, 0
+end
+
+local function shortClass(w)
+    return (w:GetClass():gsub("^gmod_subway_81%-", ""):gsub("^gmod_subway_", ""))
+end
+
+-- The full rich status (APPROACH/DOORS/TERMINUS/HELD AT SIGNAL/...) the driver
+-- already publishes, minus the trailing "  62/80" speed/target (shown separately).
+local function statusTag(lead, fallback)
+    local s = lead:GetNW2String("AIStatus", "")
+    s = (s:gsub("%s%s+%-?%d+/.*$", ""))
+    if s == "" then return fallback or "?" end
+    return s
+end
+
+local function networkPaths()
+    local out, total = {}, 0
+    for _, path in pairs(Metrostroi.Paths or {}) do
+        if istable(path) and #path >= 2 and total < 6000 then
+            local step = math.max(1, math.floor(#path / 120))   -- cap ~120 pts/path
+            local pts = {}
+            for i = 1, #path, step do
+                local n = path[i]
+                if n and isvector(n.pos) then pts[#pts + 1] = n.pos end
+            end
+            local last = path[#path]
+            if last and isvector(last.pos) then pts[#pts + 1] = last.pos end
+            if #pts >= 2 then out[#out + 1] = pts; total = total + #pts end
+        end
+    end
+    return out
+end
+
+net.Receive("MetrostroiAI_Map", function(_, ply)
+    local paths = networkPaths()
+    net.Start("MetrostroiAI_Map")
+    net.WriteUInt(#paths, 16)
+    for _, pts in ipairs(paths) do
+        net.WriteUInt(#pts, 16)
+        for _, p in ipairs(pts) do net.WriteFloat(p.x) net.WriteFloat(p.y) end
+    end
+    net.Send(ply)
+end)
+
+net.Receive("MetrostroiAI_Trains", function(_, ply)
+    local drivers = orderedDrivers()
+    local aiWag, entries = {}, {}
+    for i, drv in ipairs(drivers) do
+        local lead = IsValid(drv.head) and drv.head or drv.lead
+        if IsValid(lead) then
+            for _, w in ipairs(drv.wagons or {}) do aiWag[w] = true end
+            local pid, px = netPos(lead)
+            local st = nearStation(lead:GetPos())
+            entries[#entries + 1] = {
+                p = lead:GetPos(), a = drv.travelDir or lead:GetForward(), ai = i,
+                path = pid, x = px, spd = bogeySpeed(lead),
+                tag = statusTag(lead, tostring(drv.state or "?")),
+            }
+        end
+    end
+    local seen = {}
+    for t in pairs(Metrostroi.SpawnedTrains or {}) do
+        if IsValid(t) and not seen[t] then
+            local cars, n, isAI = (istable(t.WagonList) and t.WagonList or { t }), 0, false
+            for _, w in pairs(cars) do if IsValid(w) then n = n + 1; seen[w] = true; if aiWag[w] then isAI = true end end end
+            if not isAI then
+                local pid, px = netPos(t)
+                entries[#entries + 1] = {
+                    p = t:GetPos(), a = t:GetForward(), ai = 0, path = pid, x = px, spd = bogeySpeed(t),
+                    tag = "@" .. nearStation(t:GetPos()) .. " x" .. n,
+                }
+            end
+        end
+    end
+    net.Start("MetrostroiAI_Trains")
+    net.WriteUInt(#entries, 12)
+    for _, e in ipairs(entries) do
+        net.WriteFloat(e.p.x) net.WriteFloat(e.p.y)
+        net.WriteFloat(e.a.x) net.WriteFloat(e.a.y)
+        net.WriteUInt(e.ai, 8)
+        net.WriteUInt(e.path, 16) net.WriteFloat(e.x)
+        net.WriteInt(math.Clamp(e.spd, -300, 300), 16)
+        net.WriteString(e.tag)
+    end
+    net.Send(ply)
+end)
+
+-- Stitch the raw path segments into continuous ROUTES by following connectivity:
+-- two path endpoints that sit on the same spot (3D, so stacked loops don't merge)
+-- are joined, and at a junction we keep the straightest continuation so crossovers
+-- branch off as their own short chains instead of breaking the running line.
+local function buildChains()
+    local P = {}
+    for id, path in pairs(Metrostroi.Paths or {}) do
+        if istable(path) and #path >= 2 and tonumber(path.length) then
+            local a, b = path[1], path[#path]
+            if isvector(a.pos) and isvector(b.pos) and isvector(path[2].pos) and isvector(path[#path - 1].pos) then
+                P[#P + 1] = {
+                    id  = math.Clamp(math.floor(tonumber(path.id) or tonumber(id) or 0), 0, 65535),
+                    len = path.length, pa = a.pos, pb = b.pos,
+                    oa  = (a.pos - path[2].pos):GetNormalized(),          -- outward tangent at A
+                    ob  = (b.pos - path[#path - 1].pos):GetNormalized(),  -- outward tangent at B
+                    used = false,
+                }
+            end
+        end
+    end
+    local function bestCont(pos, outDir)
+        local best, bestScore, bestEnd
+        for _, q in ipairs(P) do
+            if not q.used then
+                for _, e in ipairs({ { q.pa, q.oa, "a" }, { q.pb, q.ob, "b" } }) do
+                    if pos:DistToSqr(e[1]) < 40 * 40 then
+                        local score = -outDir:Dot(e[2])                  -- 1 = straight through
+                        if score > 0.25 and (not bestScore or score > bestScore) then
+                            best, bestScore, bestEnd = q, score, e[3]
+                        end
+                    end
+                end
+            end
+        end
+        return best, bestEnd
+    end
+    table.sort(P, function(a, b) return a.len > b.len end)
+    local chains = {}
+    for _, seed in ipairs(P) do
+        if not seed.used then
+            seed.used = true
+            local segs = { { path = seed, flip = false } }
+            local cp, co = seed.pb, seed.ob                              -- extend forward
+            while true do
+                local q, qe = bestCont(cp, co)
+                if not q then break end
+                q.used = true
+                if qe == "a" then segs[#segs + 1] = { path = q, flip = false }; cp, co = q.pb, q.ob
+                else              segs[#segs + 1] = { path = q, flip = true  }; cp, co = q.pa, q.oa end
+            end
+            cp, co = seed.pa, seed.oa                                    -- extend backward
+            while true do
+                local q, qe = bestCont(cp, co)
+                if not q then break end
+                q.used = true
+                if qe == "b" then table.insert(segs, 1, { path = q, flip = false }); cp, co = q.pa, q.oa
+                else              table.insert(segs, 1, { path = q, flip = true  }); cp, co = q.pb, q.ob end
+            end
+            local off = 0
+            for _, s in ipairs(segs) do s.offset = off; off = off + s.path.len end
+            chains[#chains + 1] = segs
+        end
+    end
+    return chains
+end
+
+net.Receive("MetrostroiAI_Schematic", function(_, ply)
+    local chains = buildChains()
+    local stations = {}
+    for _, pf in ipairs(ents.FindByClass("gmod_track_platform")) do
+        if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
+            local c = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+            local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, pf:GetAngles())
+            if ok and res and res[1] and res[1].path then
+                stations[#stations + 1] = {
+                    path = math.Clamp(math.floor(tonumber(res[1].path.id) or 0), 0, 65535),
+                    x = res[1].x or 0, wx = c.x, wy = c.y, st = tostring(pf.StationIndex or "?") }
+            end
+        end
+    end
+    net.Start("MetrostroiAI_Schematic")
+    net.WriteUInt(#chains, 16)
+    for _, segs in ipairs(chains) do
+        net.WriteUInt(#segs, 16)
+        for _, s in ipairs(segs) do
+            net.WriteUInt(s.path.id, 16) net.WriteFloat(s.offset) net.WriteFloat(s.path.len) net.WriteBool(s.flip)
+        end
+    end
+    net.WriteUInt(#stations, 16)
+    for _, s in ipairs(stations) do
+        net.WriteUInt(s.path, 16) net.WriteFloat(s.x) net.WriteFloat(s.wx) net.WriteFloat(s.wy) net.WriteString(s.st)
+    end
+    net.Send(ply)
 end)
