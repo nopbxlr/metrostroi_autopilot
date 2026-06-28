@@ -478,18 +478,25 @@ function DRIVER:TurnbackThink(now, dt, speed)
         self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TURNBACK reverse"); return
     end
 
-    -- KEEP OBEYING a red signal while crawling - not just at the leg's start gate. If the
-    -- signal governing us is held at STOP for an occupied / closed block AHEAD, brake and
-    -- wait; we don't run it just because we're mid-turn-back. We test the occupancy/closure
-    -- flags (Occupied/Close/KGU), NOT the ARS code - a turn-back throat is un-coded, so "no
-    -- code" there is not a red and must not freeze us - and only for a signal ahead of us (a
-    -- stale signal behind, or one our own train sits on, must not count).
-    local rs = self.arsSignal
-    if IsValid(rs) and (rs.Occupied or rs.Close or rs.KGU)
-       and self:ForwardDist(rs:GetPos()) > HALF_CAR then
-        self:ApplyDrive(0, AI.HOLD_BRAKE)
-        self:SetStatus("TURNBACK " .. tb.phase .. " (held at red signal ahead)")
-        return
+    -- Obey a real red ONLY on the come-back leg (LEG2), where we're rejoining the live line
+    -- and a stop means an occupied block AHEAD. On LEG1 we run INTO the terminus throat to
+    -- reverse, so the dead-end reds ahead of us are expected and must NOT freeze us partway
+    -- across the crossover (the leg-start gate already proved our route was clear to enter,
+    -- and we reverse the moment we clear the points - we never reach those reds).
+    -- "Red" = no movement authority: a stop CODE (0), or - on an un-coded throat with no code
+    -- to read - a governing signal flagged at stop. A valid GO code (e.g. 40) IS the
+    -- interlocking's authority (it won't code us into an occupied block), so we must NOT
+    -- freeze on a mere Occupied flag while we hold a code - that stopped us dead at a coded
+    -- terminus-side signal our nose had already passed.
+    if tb.phase == "LEG2" then
+        local rs  = self.arsSignal
+        local red = (self.arsSpeed == 0)
+                 or (self.arsSpeed == nil and IsValid(rs) and (rs.Occupied or rs.Close or rs.KGU))
+        if red and IsValid(rs) and self:ForwardDist(rs:GetPos()) > HALF_CAR then
+            self:ApplyDrive(0, AI.HOLD_BRAKE)
+            self:SetStatus("TURNBACK LEG2 (held at red signal ahead)")
+            return
+        end
     end
 
     -- CRAWL: LEG1 forward to clear the points (it reverses above once across), LEG2 forward
