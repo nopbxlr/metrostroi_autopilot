@@ -464,11 +464,10 @@ function DRIVER:OpenTurnbackRoute()
                     if divertFd and maxfd and maxfd > -AI.HALF_CAR then
                         local h    = hopsToReturn(v.NextSignal)
                         local dci  = chainOf(v.NextSignal)
-                        local line = dci and AI.Route and AI.Route.chainStations
-                                     and AI.Route.chainStations[dci] and #AI.Route.chainStations[dci] > 0 or false
                         local onOurChain = ourChain and chainOf(sig.Name) == ourChain or false
                         cands[#cands + 1] = { sig = sig, k = k, name = v.RouteName, divertFd = divertFd,
-                                              reaches = (h ~= nil), line = line, onOurChain = onOurChain, h = h }
+                                              reaches = (h ~= nil), real = (dci ~= nil), dci = dci,
+                                              onOurChain = onOurChain, h = h }
                         if not nearest or divertFd < nearest then nearest = divertFd end
                     end
                 end
@@ -482,19 +481,23 @@ function DRIVER:OpenTurnbackRoute()
     local throat = (nearest or 0) + TURNBACK_DIAG_M * AI.U_PER_M
     for _, c in ipairs(cands) do
         if c.divertFd <= throat then
-            -- governs OUR track (1e7); reaches a real continuation - the return track or
-            -- any line track, NOT a dead pull-track stub (1e6); then the NEAREST entry
-            -- (- divertFd) so among the throat's crossovers we take the first one that
-            -- actually goes somewhere. A pure stub (SV2005 'SV5-') loses the 1e6.
+            -- governs OUR track (1e7); leads to a real signal/track, NOT a dead stub
+            -- ('*', 1e6) - note an OFF-LINE depot/tail lead is NOT a dead stub: it's the
+            -- valid reversing leg of a sawtooth turn-back, so we must NOT down-rank it the
+            -- way "reaches a line track" did (that made us skip the nearest switch for a
+            -- farther route that merely reached the line). Then the NEAREST entry
+            -- (- divertFd): the FIRST switch on our rail is the one we physically take, so
+            -- the route MUST throw it - diverting at a farther switch leaves the near one
+            -- straight and the crossover never engages ("we don't open the route").
             local score = (c.onOurChain and 1e7 or 0)
-                          + ((c.reaches or c.line) and 1e6 or 0)
+                          + (c.real and 1e6 or 0)
                           - c.divertFd / AI.U_PER_M
             if not bestScore or score > bestScore then
                 best, bestK, bestScore, bestName = c.sig, c.k, score, c.name
                 bestTag = string.format("%s%s @%dm",
                     c.onOurChain and "OUR-track " or "OTHER-track ",
                     c.reaches and string.format("-> RETURN %dhop", c.h)
-                        or (c.line and "-> line" or "-> STUB"),
+                        or (c.real and ("-> ch" .. tostring(c.dci)) or "-> STUB"),
                     math.Round(c.divertFd / AI.U_PER_M))
             end
         end
