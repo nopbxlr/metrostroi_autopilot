@@ -37,7 +37,7 @@ AI.CVars = {
     ars_onboard     = CreateConVar("metrostroi_ai_ars",           "0", FCVAR_ARCHIVE, "Power up the train's own ARS at autostart. 0 avoids the unmanned vigilance buzzer (speed limits still come from the signals)."),
     station_stops   = CreateConVar("metrostroi_ai_station_stops",  "1", FCVAR_ARCHIVE, "1 = stop & dwell at platforms, 0 = run through"),
     terminus_rev    = CreateConVar("metrostroi_ai_terminus_reverse","1",FCVAR_ARCHIVE, "1 = reverse and continue at end of track, 0 = just hold"),
-    turnback_speed  = CreateConVar("metrostroi_ai_turnback_speed", "12", FCVAR_ARCHIVE, "Max speed (km/h) while threading a turn-back crossover/scissors - low so the bogeys don't derail on the diverging points"),
+    turnback_speed  = CreateConVar("metrostroi_ai_turnback_speed", "25", FCVAR_ARCHIVE, "Max speed (km/h) while threading a turn-back crossover/scissors - low so the bogeys don't derail on the diverging points"),
     powerup         = CreateConVar("metrostroi_ai_powerup",        "1", FCVAR_ARCHIVE, "Run the cabin autostart on engage (lights/cabin/ARS/air alive). 81-717/714 family."),
     open_doors      = CreateConVar("metrostroi_ai_open_doors",     "1", FCVAR_ARCHIVE, "Open doors at stations (needs powerup so the air/door circuit is live)"),
     obey_signals    = CreateConVar("metrostroi_ai_obey_signals",   "1", FCVAR_ARCHIVE, "1 = stop at red signals / occupied blocks"),
