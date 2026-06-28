@@ -259,24 +259,34 @@ end
 -- no loop-back), it's a terminus. Because it follows the real track geometry it
 -- never false-fires on curves the way a straight world-space probe did.
 function DRIVER:TerminusDistance(pos)
-    if not (pos and pos.path and pos.x and pos.node1 and isvector(pos.node1.dir)) then return nil end
+    -- self.termWhy records WHICH branch decided the outcome, so !ai term can show
+    -- why a real dead end was (or wasn't) seen instead of us having to guess.
+    if not (pos and pos.path and pos.x and pos.node1 and isvector(pos.node1.dir)) then
+        self.termWhy = "no network pos / node1.dir"; return nil end
     local path = pos.path
     local first, last = path[1], path[#path]
-    if not (first and last) then return nil end
+    if not (first and last) then self.termWhy = "path has no end nodes"; return nil end
     local sgn = (self.travelDir:Dot(pos.node1.dir) < 0) and -1 or 1
     local endNode = (sgn > 0) and last or first
-    if not (isvector(endNode.pos) and isvector(endNode.dir)) then return nil end
+    if not (isvector(endNode.pos) and isvector(endNode.dir)) then
+        self.termWhy = "end node missing pos/dir"; return nil end
 
     local dist_m = (endNode.x - pos.x) * sgn               -- metres to the path end ahead
-    if dist_m <= 0 or dist_m > 400 then return nil end      -- behind us / out of braking range
+    if dist_m <= 0 then
+        self.termWhy = string.format("path end behind us (%.0fm, sgn=%d)", dist_m, sgn); return nil end
+    if dist_m > 400 then
+        self.termWhy = string.format("path end too far (%.0fm > 400)", dist_m); return nil end
 
     local dir = endNode.dir * sgn
     for _, d in ipairs({ 4, 9, 16 }) do                     -- probe just past the end
         local p = endNode.pos + dir * (d * AI.U_PER_M)
         local res = Metrostroi.GetPositionOnTrack(p, dir:Angle())
-        if res and res[1] and (res[1].distance or 1e9) < 100 then
+        local rd = res and res[1] and res[1].distance
+        if rd and rd < 100 then
+            self.termWhy = string.format("track continues past end (probe %dm -> %.0fu; end %.0fm ahead)", d, rd, dist_m)
             return nil                                      -- track continues -> not a terminus
         end
     end
+    self.termWhy = string.format("TERMINUS %.0fm ahead", dist_m)
     return dist_m
 end

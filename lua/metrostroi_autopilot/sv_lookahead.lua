@@ -57,6 +57,41 @@ function DRIVER:ARSLost(now)
     return (self.arsEverSeen and self.arsLostAt and (now - self.arsLostAt) > 1.0) and true or false
 end
 
+-- Follow the rail FORWARD from the nose (re-projecting onto the nearest track
+-- each step, so it tracks through curves) and return the distance in metres to
+-- where the drivable track ends within `maxScan`, or nil if it keeps going. This
+-- is purely geometric - no ARS - so it's the authority on a real dead end: a
+-- transient or mid-line ARS dropout where the rail still runs ahead reads as
+-- "continues" here and so can never trigger a stop or a turn-back. Conservative:
+-- any uncertainty (no API / lost the rail sideways) returns nil = "continues".
+function DRIVER:TrackEndAhead(maxScan)
+    if not (Metrostroi.GetPositionOnTrack and isvector(self.travelDir)) then return nil end
+    local dir = Vector(self.travelDir); dir:Normalize()
+    -- start at the foremost point of the train (nose) in the travel direction
+    local ref, best = nil, -math.huge
+    for _, w in ipairs(self.wagons or {}) do
+        if IsValid(w) then
+            local d = w:GetPos():Dot(dir)
+            if d > best then best, ref = d, w:GetPos() end
+        end
+    end
+    if not isvector(ref) then return nil end
+    local prev, gone, step = ref + dir * AI.HALF_CAR, 0, 8     -- 8 m probe steps
+    while gone < maxScan do
+        local probe = prev + dir * (step * AI.U_PER_M)
+        local ok, res = pcall(Metrostroi.GetPositionOnTrack, probe, dir:Angle())
+        local r = ok and res and res[1]
+        if not (r and isvector(r.pos) and (r.distance or 1e9) < 250) then
+            return gone                                       -- no rail ahead -> end of track
+        end
+        local nd = r.pos - prev
+        if nd:Length() > 1 then nd:Normalize(); if nd:Dot(dir) > 0 then dir = nd end end  -- steer along the rail
+        prev = r.pos
+        gone = gone + step
+    end
+    return nil                                                -- rail continues past the scan
+end
+
 -- Decode a governing signal to the km/h the cab ARS would show, exactly like the
 -- stock ALS coil: GetARS(8/7/6/4/0) -> 80/70/60/40/stop. This factors in the
 -- NEXT signal's code / the 1-5 vs 2-6 decoder, which the raw ARSSpeedLimit field

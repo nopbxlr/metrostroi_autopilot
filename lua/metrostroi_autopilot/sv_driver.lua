@@ -346,30 +346,33 @@ function DRIVER:Think(now)
         target = math.min(target, self:StopSpeed(obstacleM))
     end
 
-    -- LOSS OF ARS FREQUENCY: we were on coded track and the code has dropped out,
-    -- with nothing to serve ahead (the un-coded dead-end stub past a terminus).
-    -- Treat it like a stop signal - brake firmly to a halt rather than coast at
-    -- cruise into a wall - then, if reversing is enabled, change ends and turn the
-    -- train back through the crossover behind us. The cooldown (cleared the moment
-    -- we re-acquire a code) lets the reversed train drive back off the stub instead
-    -- of instantly braking/re-reversing while it's still on un-coded track.
+    -- END OF TRACK (geometry-authoritative, ARS-corroborated). Losing the ARS code
+    -- with no platform to serve is only the CUE to look; the geometric forward rail
+    -- scan is the AUTHORITY. We follow the actual rail ahead and act ONLY if it
+    -- genuinely ends within braking range - then a precise feed-forward stop short
+    -- of the buffer, and a turn-back through the crossover behind us. If the rail
+    -- still runs ahead (a transient or mid-line ARS dropout), we do nothing, so a
+    -- blip can never brake or reverse the train. The cooldown (cleared on re-
+    -- acquiring a code, set by BeginReverse) lets the reversed train drive back off
+    -- the un-coded stub instead of instantly re-detecting the end behind it.
     if self:ARSLost(now) and not pf and not self.arsReverseCooldown then
-        if speed > ARRIVE_SPEED then
-            self:ApplyDrive(0, 5)                       -- firm brake: no authority ahead
-            self:SetStatus("ARS LOST - braking")
+        local endM = self:TrackEndAhead(200)
+        if endM then
+            local aim = endM - TERMINUS_BUFFER
+            if speed <= ARRIVE_SPEED and aim <= 1.2 then
+                if AI.CVars.terminus_rev:GetInt() == 1 then self:BeginReverse(now)
+                else self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TERMINUS (rail ends)") end
+                return
+            end
+            local vms  = speed / 3.6
+            local need = (aim > 0.05) and (vms * vms) / (2 * aim) or 99
+            self:ApplyDrive(0, math.Clamp(need * BRAKE_PER_MS2 * 1.3, 0.6, 6))
+            self:SetStatus(string.format("RAIL ENDS %dm", math.Round(endM)))
             return
         end
-        self.arsHoldStart = self.arsHoldStart or now
-        if AI.CVars.terminus_rev:GetInt() == 1 and (now - self.arsHoldStart) > 2 then
-            self.arsHoldStart = nil
-            self:BeginReverse(now)                      -- end of coded track: turn back
-            return
-        end
-        self:ApplyDrive(0, AI.HOLD_BRAKE)
-        self:SetStatus("ARS LOST - held (end of line)")
-        return
+        -- ARS lost but the rail clearly continues: a blip / un-coded gap, not a dead
+        -- end. Don't stop - fall through and keep driving (cruise governs).
     end
-    self.arsHoldStart = nil
 
     -- Platform stop - DISTANCE-BASED braking. Each tick we work out the
     -- deceleration needed to bring the nose to rest on the aim point (a couple of

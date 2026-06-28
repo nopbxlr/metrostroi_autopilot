@@ -158,6 +158,9 @@ function AI.CmdTermDebug(ply)
         tostring(drv.state),
         term and (string.format("%.0f m to buffer", term)) or "none (track continues / loop)",
         thrown))
+    line("  terminus probe (path end): " .. tostring(drv.termWhy))
+    local te = drv:TrackEndAhead(200)
+    line("  rail scan ahead (geometry): " .. (te and string.format("ENDS %.0fm", te) or "continues past 200m"))
     -- What platform (if any) the driver is currently locked onto - the prime
     -- suspect for getting stuck at a terminus is the OPPOSITE-track face being
     -- re-acquired (small farFd, lateral ~= track gap) so the platform block keeps
