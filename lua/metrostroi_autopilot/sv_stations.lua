@@ -395,8 +395,8 @@ function DRIVER:OpenTurnbackRoute()
             local rel = sw:GetPos() - ref
             local fd  = rel:Dot(dir)
             local lat = (rel - dir * fd):Length()
-            if fd > -AI.HALF_CAR and fd < 120 * AI.U_PER_M and lat < 450 then
-                ourRail[(sw:GetNW2String("ID", "") or ""):upper()] = true
+            if fd > -AI.HALF_CAR and fd < 120 * AI.U_PER_M and lat < TURNBACK_NEAR_U then
+                ourRail[(sw:GetNW2String("ID", "") or ""):upper()] = true   -- on OUR rail, not the far one
             end
         end
     end
@@ -447,15 +447,20 @@ function DRIVER:OpenTurnbackRoute()
                     -- so we never grab a crossover we've already driven past - e.g. the
                     -- previous station's, which reaches the line-long return track too)
                     -- and nearest switch (the crossover we'd hit FIRST, the tie-break).
-                    local maxfd, nearAbs, ourDivert = nil, nil, 0
+                    local maxfd, divertFd
                     for _, e in ipairs(string.Explode(",", v.Switches)) do
                         if e ~= "" then
-                            if e:sub(-1) == "-" and ourRail[e:sub(1, -2):upper()] then ourDivert = ourDivert + 1 end
-                            local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(e:sub(1, -2))
+                            local nm = e:sub(1, -2)
+                            local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(nm)
                             if IsValid(s) then
                                 local fd = (s:GetPos() - ref):Dot(dir)
                                 if not maxfd or fd > maxfd then maxfd = fd end
-                                if not nearAbs or math.abs(fd) < nearAbs then nearAbs = math.abs(fd) end
+                                -- nearest point ON OUR RAIL it throws to alt = the scissors
+                                -- entry it would actually divert US at
+                                if e:sub(-1) == "-" and ourRail[nm:upper()] then
+                                    local a = math.abs(fd)
+                                    if not divertFd or a < divertFd then divertFd = a end
+                                end
                             end
                         end
                     end
@@ -476,16 +481,20 @@ function DRIVER:OpenTurnbackRoute()
                         -- the return track is only a tiny nudge, because the real move
                         -- threads the scissors/sidings first (AK2-4 doesn't forward-reach
                         -- it, yet it's the correct route), so that test must NOT dominate.
+                        -- governs OUR track (1e7); diverts OUR rail (1e6) at the NEAREST
+                        -- point so we take the scissors entry we reach FIRST (- divertFd);
+                        -- reaches the return track (1e5, dominating distance so a near route
+                        -- into a depot can't beat a real return route).
                         local score = (onOurChain and 1e7 or 0)
-                                      + (ourDivert > 0 and 1e6 or 0)
-                                      + (h ~= nil and 1e3 or 0)
-                                      - (nearAbs or 0)
-                        if (onOurChain or ourDivert > 0 or h ~= nil or line)
+                                      + (divertFd and 1e6 or 0)
+                                      + (h ~= nil and 1e5 or 0)
+                                      - (divertFd or 0)
+                        if (onOurChain or divertFd or h ~= nil or line)
                            and (not bestScore or score > bestScore) then
                             best, bestK, bestScore, bestName = sig, k, score, v.RouteName
                             bestTag = string.format("%s%s",
                                 onOurChain and "OUR-track " or "OTHER-track ",
-                                ourDivert > 0 and "diverts our rail"
+                                divertFd and string.format("diverts our rail @%dm", math.Round(divertFd / AI.U_PER_M))
                                 or (h ~= nil and string.format("-> RETURN %dhop", h) or "-> line"))
                         end
                     end
