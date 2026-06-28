@@ -289,35 +289,68 @@ end
 -- "throwing" it). Returns false (and the raw SendSignal fallback still runs) on
 -- maps whose switches aren't route-controlled.
 function DRIVER:OpenTurnbackRoute()
-    local want, n = {}, 0
+    local head = self:GetHead()
+    if not IsValid(head) then return false end
+    local ref = head:GetPos()
+    -- switches we think the crossover physically uses (geometric pick), for tie-break
+    local want = {}
     for _, sw in ipairs(self.turnbackSwitches or {}) do
         if IsValid(sw) then
             local id = (sw:GetNW2String("ID", "") or ""):upper()
-            if id ~= "" and not want[id] then want[id] = true; n = n + 1 end
+            if id ~= "" then want[id] = true end
         end
     end
-    if n == 0 then return false end
-    -- the right route is the one that throws the MOST of our switches to alt ("-")
-    local bestSig, bestK, bestScore, bestName
+    local byName = {}
+    for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
+        if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
+    end
+    -- does a route's destination sit on the running LINE (i.e. it takes us back
+    -- onto a track that serves stations) rather than off into the depot / yard?
+    local function leadsToLine(nx)
+        local sg = byName[nx or ""]
+        if not IsValid(sg) then return false end
+        local tp = sg.TrackPosition
+        return (istable(tp) and tp.path and AI.IsLinePath
+                and AI.IsLinePath(math.floor(tonumber(tp.path.id) or 0))) or false
+    end
+    -- Pick the route that (1) goes back onto the LINE - the proper track change, never
+    -- the depot - and (2) among those, throws the most of our geometric switches. The
+    -- LINE classification dominates so a depot route can never win.
+    local maxFd = (TURNBACK_SCAN_M + 50) * AI.U_PER_M
+    local best, bestK, bestScore, bestName, bestLine
     for _, sig in ipairs(ents.FindByClass("gmod_track_signal")) do
-        if IsValid(sig) and istable(sig.Routes) then
+        if IsValid(sig) and istable(sig.Routes) and sig:GetPos():Distance(ref) < maxFd then
             for k, v in pairs(sig.Routes) do
-                if istable(v) and isstring(v.Switches) and v.Switches ~= "" then
-                    local score = 0
+                if istable(v) and isstring(v.Switches) and v.Switches:find("%-") then
+                    local overlap = 0
                     for _, e in ipairs(string.Explode(",", v.Switches)) do
-                        if e ~= "" and e:sub(-1) == "-" and want[e:sub(1, -2):upper()] then score = score + 1 end
+                        if e ~= "" and e:sub(-1) == "-" and want[e:sub(1, -2):upper()] then overlap = overlap + 1 end
                     end
+                    local line  = leadsToLine(v.NextSignal)
+                    local score = (line and 100 or 0) + overlap
                     if score > 0 and (not bestScore or score > bestScore) then
-                        bestSig, bestK, bestScore, bestName = sig, k, score, v.RouteName
+                        best, bestK, bestScore, bestName, bestLine = sig, k, score, v.RouteName, line
                     end
                 end
             end
         end
     end
-    if not bestSig then self.turnbackRoute = "no signal route lines those switches"; return false end
-    pcall(bestSig.OpenRoute, bestSig, bestK)
-    self.turnbackRoute = string.format("%s #%s '%s' (lines %d/%d of our switches)",
-        tostring(bestSig.Name), tostring(bestK), tostring(bestName or "?"), bestScore, n)
+    if not best then self.turnbackRoute = "no diverting route nearby"; return false end
+    pcall(best.OpenRoute, best, bestK)
+    -- Adopt ONLY the route's alt ("-") switches so MaintainTurnback re-asserts the
+    -- right set; the "+" (main) switches are handled by re-opening the route, and
+    -- forcing them to alt would break the path.
+    local list = {}
+    for _, e in ipairs(string.Explode(",", best.Routes[bestK].Switches)) do
+        if e ~= "" and e:sub(-1) == "-" then
+            local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(e:sub(1, -2))
+            if IsValid(s) then list[#list + 1] = s end
+        end
+    end
+    if #list > 0 then self.turnbackSwitches = list end
+    self.turnbackRoute = string.format("%s #%s '%s' [%s]",
+        tostring(best.Name), tostring(bestK), tostring(bestName or "?"),
+        bestLine and "-> LINE" or "geometric (no line route found)")
     return true
 end
 
