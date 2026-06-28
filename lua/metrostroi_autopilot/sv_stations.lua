@@ -215,6 +215,7 @@ end
 function DRIVER:BeginReverse(now)
     self:NoteReverse(now)            -- remember this spot so we can't oscillate back to it
     self.turnbackRouteRef = nil      -- new phase/direction: re-evaluate the turn-back route
+    self.turnbackCrossed = nil
     self.travelDir = -self.travelDir
     self.servedPlatform = nil
     self.power = 0
@@ -356,7 +357,7 @@ function DRIVER:OpenTurnbackRoute()
     local head = self:GetHead()
     if not IsValid(head) then return false end
     -- Crossed onto the return track? The maneuver is done; drop the route lock.
-    if self:OnReturnTrack() then self.turnbackRouteRef = nil; return false end
+    if self:OnReturnTrack() then self.turnbackRouteRef, self.turnbackCrossed = nil, nil; return false end
     -- LOCKED: once we've committed to a turn-back route, keep re-opening that SAME
     -- route (holding its points) - do NOT re-select. Choosing a different route once
     -- the train is mid-scissors swings switches under it and derails it (we picked
@@ -493,7 +494,7 @@ function DRIVER:OpenTurnbackRoute()
         end
     end
     if not best then self.turnbackRoute = "no diverting route nearby"; return false end
-    self.turnbackRouteRef = { sig = best, k = bestK }   -- commit & lock this route
+    self.turnbackRouteRef, self.turnbackCrossed = { sig = best, k = bestK }, nil   -- commit & lock; not crossed yet
     pcall(best.OpenRoute, best, bestK)
     -- Adopt ONLY the route's alt ("-") switches so MaintainTurnback re-asserts the
     -- right set; the "+" (main) switches are handled by re-opening the route, and
@@ -540,6 +541,7 @@ function DRIVER:MaintainTurnback()
         end
     else
         self.turnbackSwitches = nil   -- keep turnbackRoute so !ai term still shows what we lined
+        if self.turnbackRouteRef then self.turnbackCrossed = true end   -- whole train is past the points
     end
 end
 

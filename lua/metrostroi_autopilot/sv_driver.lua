@@ -353,6 +353,18 @@ function DRIVER:Think(now)
         end
     end
 
+    -- Crossed the turn-back crossover but landed on a TAIL / depot lead (not the
+    -- return track): reverse here and come back through the OTHER side of the scissors
+    -- onto the return track, rather than driving on into the depot. BeginReverse lines
+    -- the way back. (A direct-crossover terminus lands straight on the return track, so
+    -- OnReturnTrack is true and this never fires.)
+    if self.turnbackCrossed and self.turnbackRouteRef and not self:OnReturnTrack()
+       and not self:RecentlyReversedNear(now) and AI.CVars.terminus_rev:GetInt() == 1 then
+        self.turnbackCrossed = nil
+        self:BeginReverse(now)
+        return
+    end
+
     -- HARD STOP for a red signal / train ahead, using the same precise distance
     -- braking so a stop is actually held at instead of rolled through. Only takes
     -- PRIORITY over the platform when the obstacle is genuinely BEFORE it - a red
