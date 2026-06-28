@@ -216,7 +216,6 @@ function DRIVER:BeginReverse(now)
     self:NoteReverse(now)            -- remember this spot so we can't oscillate back to it
     self.turnbackRouteRef = nil      -- new phase/direction: re-evaluate the turn-back route
     self.turnbackCrossed, self.turnbackAllSwitches = nil, nil
-    self.turnbackStubFrom = nil      -- forget how far we probed the last tail/depot lead
     self.travelDir = -self.travelDir
     self.servedPlatform = nil
     self.power = 0

@@ -20,7 +20,6 @@ local TURNBACK_SCAN_M      = 400    -- m ahead to look for a turn-back crossover
 local TURNBACK_NEAR_U      = 260    -- lateral units: a switch this close is on OUR track (the entry switch)
 local TURNBACK_FAR_U       = 600    -- ... this far out is the other track (the scissors/crossover diagonal partner)
 local TURNBACK_DIAG_M      = 60     -- max longitudinal span of a crossover diagonal (entry <-> exit switch)
-local TURNBACK_STUB_MAX    = 120    -- m to probe a tail/depot lead past the scissors before turning back regardless (backstop for a lead with no buffer AND no protecting signal, so we can never trundle into a depot forever)
 
 -- Constants shared with the lookahead / stations modules (split out of this file).
 AI.C = {
@@ -354,29 +353,20 @@ function DRIVER:Think(now)
         end
     end
 
-    -- Crossed the turn-back scissors but landed on a TAIL / depot lead (not the return
-    -- track): don't bail out on the points. Drive on (crawling) until a REAL stop - the
-    -- same conditions that stop us anywhere else: a red signal (the one protecting the
-    -- depot) or the end of track (the buffer at the end of the pull-track) - then reverse
-    -- and come back through the OTHER diagonal onto the return track. Those two reverses
-    -- live in their own blocks below (the obstacle block and the end-of-track blocks),
-    -- which all turn us back when inTurnbackStub; here we only arm the maneuver and keep a
-    -- hard SAFETY cap, so a depot lead with NEITHER a buffer NOR a protecting signal can
-    -- never let us trundle on into the shed forever. (A direct-crossover terminus lands
-    -- straight on the return track, so OnReturnTrack is true, this is skipped, and the
-    -- ordinary buffer turn-back handles it.)
-    local inTurnbackStub = self.turnbackCrossed and self.turnbackRouteRef
-                           and not self:OnReturnTrack()
-                           and AI.CVars.terminus_rev:GetInt() == 1
-                           and not self:RecentlyReversedNear(now)
-    if inTurnbackStub then
-        self.turnbackStubFrom = self.turnbackStubFrom or head:GetPos()
-        if head:GetPos():Distance(self.turnbackStubFrom) > TURNBACK_STUB_MAX * AI.U_PER_M then
-            self:BeginReverse(now)
-            return
-        end
-    else
-        self.turnbackStubFrom = nil
+    -- Crossed the turn-back scissors and landed on a TAIL / depot lead (NOT the return
+    -- track): turn back right here, the moment we're clear of the points, and come back
+    -- through the OTHER diagonal onto the return track. A non-return lead is a pull-track
+    -- or a depot throat - we must NOT drive on into it: its protecting signal is closed
+    -- (and unreliably detected from inside the throat), and the deeper we go the farther
+    -- the return crossover falls behind us, until the come-back leg can't even line it. A
+    -- direct-crossover terminus instead lands straight on the RETURN track, so OnReturnTrack
+    -- is true, this is skipped, and the train runs on to the buffer where the ordinary
+    -- end-of-track turn-back reverses it - that's the "end of track" half of the maneuver,
+    -- this is the "blocked / depot lead" half.
+    if self.turnbackCrossed and self.turnbackRouteRef and not self:OnReturnTrack()
+       and AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then
+        self:BeginReverse(now)
+        return
     end
 
     -- HARD STOP for a red signal / train ahead, using the same precise distance
@@ -386,13 +376,6 @@ function DRIVER:Think(now)
     local obstacleM = math.min(self.sigStopM or math.huge, self.trainStopM or math.huge)
     if obstacleM < math.huge and (not platAim or obstacleM < platAim - 5) then
         if obstacleM <= 0.6 then
-            -- On a turn-back tail/depot lead, a red signal IS the end of the line for us
-            -- (the depot route is closed): turn back here instead of sitting at it. Only
-            -- a signal - a train ahead means wait, not reverse.
-            if inTurnbackStub and self.holdSignal then
-                self:BeginReverse(now)
-                return
-            end
             self:ApplyDrive(0, speed > ARRIVE_SPEED and 6 or AI.HOLD_BRAKE)
             self:SetStatus(self.holdSignal and "HELD AT SIGNAL" or "HELD (train ahead)")
             return
