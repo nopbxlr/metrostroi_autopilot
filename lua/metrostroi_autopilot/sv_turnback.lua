@@ -374,15 +374,28 @@ function DRIVER:LegSwitchesCleared(leg)
     return true
 end
 
--- Begin the maneuver. Returns true if a plan was found and committed.
+-- Begin the maneuver. Returns true if it took control.
 function DRIVER:StartTurnback(now)
     local leg = self:PlanTurnback()
-    if not leg then return false end
-    self.tb = { phase = "LEG1", leg = leg }
-    self.servedIsTerminus = nil
-    self:OpenLeg(leg)
-    self:SetStatus("TURNBACK: " .. tostring(self.tbPlanStr))
-    return true
+    if leg then
+        self.tb = { phase = "LEG1", leg = leg }
+        self.servedIsTerminus = nil
+        self:OpenLeg(leg)
+        self:SetStatus("TURNBACK: " .. tostring(self.tbPlanStr))
+        return true
+    end
+    -- No crossover AHEAD, but we just served a terminus: the scissors is BEHIND the platform
+    -- (we crossed it on the way IN). Reverse right here at the platform - the REVERSE phase
+    -- then re-plans, now finds the scissors ahead, and crosses it (the KS case). This avoids
+    -- trundling on past the platform into the over-run to reverse there (the "pull-track dance").
+    if self.servedIsTerminus and not self:RecentlyReversedNear(now) then
+        self.servedIsTerminus = nil
+        self:FlipDirection(now)
+        self.tb = { phase = "REVERSE", holdUntil = now + 5 }
+        self:SetStatus("TURNBACK: reverse at platform (scissors behind)")
+        return true
+    end
+    return false
 end
 
 --------------------------------------------------------------------------------

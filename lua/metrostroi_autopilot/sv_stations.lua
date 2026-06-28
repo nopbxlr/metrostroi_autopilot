@@ -229,14 +229,32 @@ function DRIVER:ReturnTrackChain()
         end
     end
     if not mine then return nil end
+    local function chainOfFace(pf)
+        local c = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+        local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, pf:GetAngles())
+        if ok and res and res[1] and res[1].path then
+            return (AI.ChainPos(math.floor(tonumber(res[1].path.id) or 0), res[1].x or 0))
+        end
+    end
+    -- The return track is this terminus's DEPARTURE face: the through side, flagged
+    -- PALastStation FALSE (the arrival/reverse face is PALastStation TRUE). That is a FIXED
+    -- property of the station - unlike "the other face", which once we've crossed to the
+    -- departure side points back at the ARRIVAL side and sends us across to the wrong line.
+    local arrival, depart
+    for _, pf in ipairs(self.platforms or {}) do
+        if IsValid(pf) and pf.StationIndex == mine.StationIndex
+           and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
+            local info = self:PAInfoFor(pf)
+            if info and info.isLast then arrival = pf
+            elseif info then depart = pf end
+        end
+    end
+    if arrival and depart then return chainOfFace(depart) end
+    -- No PALastStation distinction (or no PA data): fall back to the OTHER face.
     for _, pf in ipairs(self.platforms or {}) do
         if IsValid(pf) and pf ~= mine and pf.StationIndex == mine.StationIndex
            and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
-            local c = (pf.PlatformStart + pf.PlatformEnd) * 0.5
-            local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, pf:GetAngles())
-            if ok and res and res[1] and res[1].path then
-                return (AI.ChainPos(math.floor(tonumber(res[1].path.id) or 0), res[1].x or 0))
-            end
+            return chainOfFace(pf)
         end
     end
     return nil
