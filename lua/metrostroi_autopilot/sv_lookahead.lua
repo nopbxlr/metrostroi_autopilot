@@ -64,37 +64,85 @@ end
 -- transient or mid-line ARS dropout where the rail still runs ahead reads as
 -- "continues" here and so can never trigger a stop or a turn-back. Conservative:
 -- any uncertainty (no API / lost the rail sideways) returns nil = "continues".
-function DRIVER:TrackEndAhead(maxScan)
-    if not (Metrostroi.GetPositionOnTrack and Metrostroi.GetTrackPosition) then return nil end
+-- Walk the rail forward from the nose and report distance (m) to where it ends
+-- within maxScan, or nil if it continues. Returns started=false when the network
+-- position is too degenerate to even begin (right at some buffers pos.node1 / its
+-- dir go missing), so the caller can fall back to a physical check. The tangent
+-- comes from the track itself via GetTrackPosition, NOT pos.node1.dir, so a
+-- missing node1 doesn't blind it. We then re-project each step onto the nearest
+-- track so it follows curves AND crosses path-segment boundaries. Start RAIL-LEVEL
+-- (the wagon's own GetPos sits above the rail - scanning from it read as instantly
+-- off-track, the old "ENDS 0m" bug).
+function DRIVER:RailScanAhead(maxScan)
+    if not (Metrostroi.GetPositionOnTrack and Metrostroi.GetTrackPosition and isvector(self.travelDir)) then
+        return false
+    end
     local head = self:GetHead()
     local tp   = IsValid(head) and Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
     local pos  = tp and tp[1]
-    if not (pos and pos.path and pos.x and pos.node1 and isvector(pos.node1.dir)
-            and isvector(self.travelDir)) then return nil end
-    -- Start at the nose, but RAIL-LEVEL: take the network track position a half-car
-    -- ahead of the head centre (the wagon's own GetPos sits ABOVE the rail, which
-    -- is why scanning from it read as instantly off-track). Then walk the rail
-    -- forward, re-projecting each step onto the nearest track so it follows curves
-    -- AND crosses path-segment boundaries (the dead end was a short segment past
-    -- the current path's end, which the path-end probe never reached).
-    local sgn   = (self.travelDir:Dot(pos.node1.dir) < 0) and -1 or 1
-    local rp, rd = Metrostroi.GetTrackPosition(pos.path, pos.x + sgn * (AI.HALF_CAR / AI.U_PER_M))
-    if not (isvector(rp) and isvector(rd)) then return nil end
-    local dir = Vector(rd); dir:Normalize(); dir = dir * sgn
+    if not (pos and pos.path and pos.x) then return false end
+    local cpos, cdir = Metrostroi.GetTrackPosition(pos.path, pos.x)
+    if not (isvector(cpos) and isvector(cdir)) then return false end
+    local sgn = (self.travelDir:Dot(cdir) < 0) and -1 or 1
+    local rp  = Metrostroi.GetTrackPosition(pos.path, pos.x + sgn * (AI.HALF_CAR / AI.U_PER_M))
+    if not isvector(rp) then rp = cpos end
+    local dir = Vector(cdir); dir:Normalize(); dir = dir * sgn
     local prev, gone, step = rp, 0, 8                         -- 8 m probe steps
     while gone < maxScan do
         local probe = prev + dir * (step * AI.U_PER_M)
         local ok, res = pcall(Metrostroi.GetPositionOnTrack, probe, dir:Angle())
         local r = ok and res and res[1]
         if not (r and isvector(r.pos) and (r.distance or 1e9) < 250) then
-            return gone                                       -- no rail ahead -> end of track
+            return true, gone                                 -- rail ends here
         end
         local nd = r.pos - prev
         if nd:Length() > 1 then nd:Normalize(); if nd:Dot(dir) > 0 then dir = nd end end  -- steer along the rail
         prev = r.pos
         gone = gone + step
     end
-    return nil                                                -- rail continues past the scan
+    return true, nil                                          -- ran, rail continues past the scan
+end
+
+-- Physical last resort for when the network position is degenerate at a stub end
+-- (no node1, GetTrackPosition useless): trace forward from the nose for a wall
+-- that FACES us (a buffer), so tunnel side-walls on a curve don't count. World
+-- brushwork only, so props / clutter / other cars don't false-trigger.
+function DRIVER:BufferTraceAhead(maxM)
+    local head = self:GetHead()
+    if not (IsValid(head) and isvector(self.travelDir)) then return nil end
+    local dir = Vector(self.travelDir); dir:Normalize()
+    local ref, best = nil, -math.huge
+    for _, w in ipairs(self.wagons or {}) do
+        if IsValid(w) then local d = w:GetPos():Dot(dir); if d > best then best, ref = d, w:GetPos() end end
+    end
+    if not isvector(ref) then return nil end
+    local start = ref + dir * AI.HALF_CAR + Vector(0, 0, 40)
+    local tr = util.TraceLine({
+        start  = start,
+        endpos = start + dir * (maxM * AI.U_PER_M),
+        mask   = MASK_SOLID_BRUSHONLY,
+        filter = self.wagons,
+    })
+    if tr.Hit and isvector(tr.HitNormal) and tr.HitNormal:Dot(-dir) > 0.6 then
+        return math.max(0, (tr.Fraction or 1) * maxM)
+    end
+    return nil
+end
+
+-- Distance (m) to the end of drivable track ahead, or nil if it keeps going.
+-- Network rail scan first (precise, crosses segment boundaries); if the network
+-- position is too degenerate to scan at all, a short physical buffer trace as a
+-- backstop so we still never nose into the wall.
+function DRIVER:TrackEndAhead(maxScan)
+    local started, dist = self:RailScanAhead(maxScan)
+    if started then
+        self.trackEndWhy = dist and string.format("rail ends %.0fm (network)", dist) or "continues (network)"
+        return dist
+    end
+    local pd = self:BufferTraceAhead(50)
+    self.trackEndWhy = pd and string.format("wall %.0fm (physics; net degenerate)", pd)
+                          or "clear (physics; net degenerate)"
+    return pd
 end
 
 -- Decode a governing signal to the km/h the cab ARS would show, exactly like the

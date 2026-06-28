@@ -159,8 +159,8 @@ function AI.CmdTermDebug(ply)
         term and (string.format("%.0f m to buffer", term)) or "none (track continues / loop)",
         thrown))
     line("  terminus probe (path end): " .. tostring(drv.termWhy))
-    local te = drv:TrackEndAhead(200)
-    line("  rail scan ahead (geometry): " .. (te and string.format("ENDS %.0fm", te) or "continues past 200m"))
+    drv:TrackEndAhead(200)
+    line("  end-of-track scan: " .. tostring(drv.trackEndWhy))
     if drv.turnbackPick then line("  turnback pick: " .. drv.turnbackPick) end
     if drv.turnbackRoute then line("  turnback route: " .. drv.turnbackRoute) end
     if drv.turnbackSwitches and #drv.turnbackSwitches > 0 then
