@@ -152,35 +152,40 @@ function DRIVER:PlanTurnback()
         return nil
     end
 
-    -- Two routes with the SAME switch list are the SAME physical move, just written on
-    -- different signals. AK1 'AK3-1' and RCAK7 #2 are both "AK5+,AK3+,AK1-": one's NextSignal
-    -- is a dead-end (AKFIX1 -> *), the other's chains to the return (AKG -> ch2). So judge
-    -- "does this move reach the return?" by the switch SET - if ANY route throwing this exact
-    -- set chains to the return, the set does. (And remember whether any such route is NAMED,
-    -- so we can prefer the dispatcher's move over an unnamed twin that picks a derailing
-    -- diagonal.) Built once over all routes.
+    -- Two routes with the SAME switch list are the SAME physical move - BUT ONLY when
+    -- entered from the SAME track. AK1 'AK3-1' and RCAK7 #2 are both "AK5+,AK3+,AK1-" on
+    -- ch4: one's NextSignal is a dead-end (AKFIX1 -> *), the other's chains to the return
+    -- (AKG -> ch2), so the move reaches the return from ch4. The IDENTICAL set as AK2
+    -- 'AK4-1' on ch3, though, just loops back into the depot. So judge "does this move reach
+    -- the return?" by (ENTRY-CHAIN, switch SET) - if any route throwing this set, entered
+    -- from this chain, chains to the return, the set does. (Same for NAMED, so we prefer the
+    -- dispatcher's move over an unnamed twin that picks a derailing diagonal.)
     local function switchKey(sw)
         local t = string.Explode(",", sw or "")
         table.sort(t)
         return table.concat(t, ",")
     end
+    local function keyOf(ch, sw) return tostring(ch) .. "|" .. switchKey(sw) end
     local setReaches, setNamed = {}, {}
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and istable(sg.Routes) then
-            for _, r in pairs(sg.Routes) do
-                if istable(r) and isstring(r.Switches) and r.Switches:find("%-") then
-                    local key = switchKey(r.Switches)
-                    if hopsToReturn(r.NextSignal) ~= nil then setReaches[key] = true end
-                    if r.RouteName ~= nil and r.RouteName ~= "" then setNamed[key] = true end
+            local sc = chainOf(sg.Name)                  -- the track this route is entered FROM
+            if sc then
+                for _, r in pairs(sg.Routes) do
+                    if istable(r) and isstring(r.Switches) and r.Switches:find("%-") then
+                        local key = keyOf(sc, r.Switches)
+                        if hopsToReturn(r.NextSignal) ~= nil then setReaches[key] = true end
+                        if r.RouteName ~= nil and r.RouteName ~= "" then setNamed[key] = true end
+                    end
                 end
             end
         end
     end
-    local function reachesReturn(sw) return setReaches[switchKey(sw)] == true end
+    local function reachesReturn(ch, sw) return setReaches[keyOf(ch, sw)] == true end
 
     -- Does a tail chain T reach the RETURN track in ONE more leg (after we reverse onto it)?
-    -- A route on a signal sitting on T whose switch set reaches the return. Tells the AK
-    -- sawtooth's ch4 tail (AK1 'AK3-1' -> ch2) from the ch3 depot dead-end. Cached per tail.
+    -- A route ENTERED FROM T whose switch set reaches the return. Tells the AK sawtooth's ch4
+    -- tail (AK1 'AK3-1' -> ch2) from the ch3 depot, where the look-alike set just loops back.
     local tailCache = {}
     local function tailReachesReturn(T)
         if not (T and returnCh) then return false end
@@ -190,7 +195,7 @@ function DRIVER:PlanTurnback()
             if IsValid(sg) and istable(sg.Routes) and chainOf(sg.Name) == T then
                 for _, r in pairs(sg.Routes) do
                     if istable(r) and isstring(r.Switches) and r.Switches:find("%-")
-                       and reachesReturn(r.Switches) then tailCache[T] = true; break end
+                       and reachesReturn(T, r.Switches) then tailCache[T] = true; break end
                 end
             end
             if tailCache[T] then break end
@@ -209,15 +214,15 @@ function DRIVER:PlanTurnback()
     local best, bestScore
     for _, c in ipairs(cands) do
         if c.divertFd <= THROAT_M * U_PER_M then
-            local direct  = reachesReturn(c.switches)               -- by switch SET, not NextSignal
+            local direct  = reachesReturn(ourCh, c.switches)        -- by (entry chain, switch SET)
             local real    = c.landCh ~= nil and c.landCh ~= ourCh
             local viaTail = (not direct) and real and tailReachesReturn(c.landCh) or false
             local kind    = direct and 3 or (viaTail and 2 or (real and 1 or 0))
-            -- "named" = this MOVE (switch set) is a route a dispatcher would !sopen, even if
-            -- THIS particular signal's copy of it is unnamed. So the correct AK5+,AK3+,AK1-
-            -- move (named 'AK3-1' on AK1) is preferred over the unnamed RCAK7 twin that
-            -- diverts AK3- and derails.
-            local named   = setNamed[switchKey(c.switches)] == true
+            -- "named" = this MOVE (switch set) entered from OUR chain is a route a dispatcher
+            -- would !sopen, even if THIS signal's copy is unnamed. So 'AK3-1' (named on ch4)
+            -- is preferred over the unnamed RCAK7 #3 twin (its named copy 'AK4-1' lives on
+            -- ch3, a different entry, so it does NOT lend its name to the ch4 move).
+            local named   = setNamed[keyOf(ourCh, c.switches)] == true
             local h       = hopsToReturn(c.nextSig)                 -- display / tie-break only
             local thisNamed = c.name ~= nil and c.name ~= "" and 1 or 0  -- show the named copy
             local score = kind * 1e7 + (named and 1e5 or 0) + thisNamed - (h or 0) * 1e3 - c.divertFd / U_PER_M
