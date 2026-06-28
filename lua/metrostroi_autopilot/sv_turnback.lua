@@ -185,9 +185,23 @@ end
 --------------------------------------------------------------------------------
 -- EXECUTION helpers
 --------------------------------------------------------------------------------
--- Open a leg's route (OpenRoute lines EVERY switch it lists) and remember its switch
--- set so we can hold it and detect when we've cleared it.
+-- Open a leg's route and remember its switch set. CLEAN SLATE first: OpenRoute lines only
+-- the switches the route LISTS and leaves every other one wherever it was - so a throat
+-- switch the route doesn't mention (leg 2's RCAK7 doesn't list AK2/AK4, which leg 1 left on
+-- alt; or an SV throat switch on a stale alt) sits on the WRONG side and derails us. So we
+-- first send every switch in the throat to MAIN (straight), THEN OpenRoute throws only its
+-- own points to alt: the train diverges ONLY at the route's switches and runs straight
+-- through all the rest.
 function DRIVER:OpenLeg(leg)
+    local head = self:GetHead()
+    if IsValid(head) then
+        local ref = head:GetPos()
+        for _, sw in ipairs(ents.FindByClass("gmod_track_switch")) do
+            if IsValid(sw) and sw:GetPos():Distance(ref) < 200 * U_PER_M then
+                pcall(sw.SendSignal, sw, "main", nil, true)
+            end
+        end
+    end
     if IsValid(leg.sig) and leg.sig.OpenRoute then pcall(leg.sig.OpenRoute, leg.sig, leg.k) end
     leg.swList, leg.nextReopen = {}, 0
     for _, e in ipairs(string.Explode(",", leg.switches or "")) do
