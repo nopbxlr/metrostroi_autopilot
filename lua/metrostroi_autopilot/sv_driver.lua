@@ -495,6 +495,14 @@ function DRIVER:Think(now)
 
     if self.holdSignal and speed <= ARRIVE_SPEED then status = "HELD AT SIGNAL" end
 
+    -- Crawl through the turn-back points. A scissors taken at line speed derails the
+    -- bogeys on the diverging frogs (the switches are set right, but we were charging
+    -- through at 40), so cap the speed while a turn-back route is committed / held.
+    if self.turnbackRouteRef or (self.turnbackSwitches and #self.turnbackSwitches > 0) then
+        target = math.min(target, AI.CVars.turnback_speed and AI.CVars.turnback_speed:GetFloat() or 12)
+        if status == "DRIVE" then status = "TURNBACK" end
+    end
+
     -- Drive toward the target speed
     self:Drive(target, speed, dt)
 
