@@ -160,7 +160,12 @@ function DRIVER:PlanTurnback()
             local real    = c.landCh ~= nil and c.landCh ~= ourCh
             local viaTail = (not direct) and real and tailReachesReturn(c.landCh) or false
             local kind  = direct and 3 or (viaTail and 2 or (real and 1 or 0))
-            local score = kind * 1e7 - c.divertFd / U_PER_M
+            -- Prefer a NAMED route (one a dispatcher would "!sopen") over an unnamed/auto
+            -- one of the same kind - the named route is the mapper's intended movement and
+            -- picks the diagonal that actually works; the unnamed twin often crosses on the
+            -- other diagonal that derails. Then nearest entry.
+            local named = c.name ~= nil and c.name ~= ""
+            local score = kind * 1e7 + (named and 1e5 or 0) - c.divertFd / U_PER_M
             if not bestScore or score > bestScore then best, bestScore, c.kind = c, score, kind end
         end
     end
@@ -185,23 +190,12 @@ end
 --------------------------------------------------------------------------------
 -- EXECUTION helpers
 --------------------------------------------------------------------------------
--- Open a leg's route and remember its switch set. CLEAN SLATE first: OpenRoute lines only
--- the switches the route LISTS and leaves every other one wherever it was - so a throat
--- switch the route doesn't mention (leg 2's RCAK7 doesn't list AK2/AK4, which leg 1 left on
--- alt; or an SV throat switch on a stale alt) sits on the WRONG side and derails us. So we
--- first send every switch in the throat to MAIN (straight), THEN OpenRoute throws only its
--- own points to alt: the train diverges ONLY at the route's switches and runs straight
--- through all the rest.
+-- Open a leg's route, exactly as "!sopen <route>" does: OpenRoute lines the route's OWN
+-- switch list (its complete set for that move) and nothing else. We do NOT manually toggle
+-- any switch - the route is authoritative; a manual "set the rest to main" would force a
+-- switch the train needs to DIVERGE at to straight, which is the wrong-side derail. Stale
+-- switches from a previous leg are cleared by CloseLeg (CloseRoute) at the transition.
 function DRIVER:OpenLeg(leg)
-    local head = self:GetHead()
-    if IsValid(head) then
-        local ref = head:GetPos()
-        for _, sw in ipairs(ents.FindByClass("gmod_track_switch")) do
-            if IsValid(sw) and sw:GetPos():Distance(ref) < 200 * U_PER_M then
-                pcall(sw.SendSignal, sw, "main", nil, true)
-            end
-        end
-    end
     if IsValid(leg.sig) and leg.sig.OpenRoute then pcall(leg.sig.OpenRoute, leg.sig, leg.k) end
     leg.swList, leg.nextReopen = {}, 0
     for _, e in ipairs(string.Explode(",", leg.switches or "")) do
@@ -210,6 +204,12 @@ function DRIVER:OpenLeg(leg)
             if IsValid(s) then leg.swList[#leg.swList + 1] = { sw = s, alt = (e:sub(-1) == "-") } end
         end
     end
+end
+
+-- Close a leg's route (CloseRoute sends all its switches back to main), so the next leg
+-- starts from a clean throat - the dispatcher's same-signal close, applied across legs.
+function DRIVER:CloseLeg(leg)
+    if leg and IsValid(leg.sig) and leg.sig.CloseRoute then pcall(leg.sig.CloseRoute, leg.sig, leg.k) end
 end
 
 -- Keep the leg lined while we thread it: re-assert each ALT switch still ahead of the
@@ -270,8 +270,10 @@ function DRIVER:TurnbackThink(now, dt, speed)
                 self.tb = nil                                   -- direct crossover: done
             else
                 local leg = self:PlanTurnback()                 -- re-plan the come-back leg
-                if leg then tb.leg = leg; tb.phase = "LEG2"; self:OpenLeg(leg)
-                else self.tb = nil end                          -- one reversal only: stop cleanly
+                if leg then
+                    self:CloseLeg(tb.leg)                        -- clear leg-1's switches first
+                    tb.leg = leg; tb.phase = "LEG2"; self:OpenLeg(leg)
+                else self.tb = nil end                           -- one reversal only: stop cleanly
             end
         end
         return
