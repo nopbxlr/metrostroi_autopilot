@@ -130,6 +130,24 @@ function DRIVER:BeginStationStop(now, pf)
     -- the throat, not at the platform - so we must NOT reverse here; run on into the
     -- tail and turn back there instead.
     self.servedDeadlock = info and (info.dlStart ~= nil or info.dlEnd ~= nil) or false
+    -- At a terminus, remember the chain of the OPPOSITE running track (this station's
+    -- other platform face) - the line we actually continue on after turning back. The
+    -- route picker prefers a route landing on THIS chain so it can't pick a reversing
+    -- stub that merely happens to share a line chain.
+    self.returnChainCi = nil
+    if self.servedIsTerminus and AI.ChainPos and Metrostroi.GetPositionOnTrack then
+        for _, op in ipairs(self.platforms or {}) do
+            if IsValid(op) and op ~= pf and op.StationIndex == pf.StationIndex
+               and isvector(op.PlatformStart) and isvector(op.PlatformEnd) then
+                local c = (op.PlatformStart + op.PlatformEnd) * 0.5
+                local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, op:GetAngles())
+                if ok and res and res[1] and res[1].path then
+                    local ci = AI.ChainPos(math.floor(tonumber(res[1].path.id) or 0), res[1].x or 0)
+                    if ci then self.returnChainCi = ci; break end
+                end
+            end
+        end
+    end
     self:ApplyDrive(0, AI.HOLD_BRAKE)
     if AI.CVars.open_doors:GetInt() == 1 then self:OpenDoors(pf) end
     hook.Run("MetrostroiAI.StationStop", self, pf)
@@ -304,20 +322,20 @@ function DRIVER:OpenTurnbackRoute()
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
     end
-    -- does a route's destination sit on the running LINE (i.e. it takes us back
-    -- onto a track that serves stations) rather than off into the depot / yard?
-    local function leadsToLine(nx)
+    -- where a route's destination signal sits: its track chain, and whether that
+    -- chain serves stations at all (a "line" track vs a depot/yard track).
+    local function destChain(nx)
         local sg = byName[nx or ""]
-        if not IsValid(sg) then return false end
+        if not IsValid(sg) then return nil end
         local tp = sg.TrackPosition
-        return (istable(tp) and tp.path and AI.IsLinePath
-                and AI.IsLinePath(math.floor(tonumber(tp.path.id) or 0))) or false
+        if not (istable(tp) and tp.path) then return nil end
+        return (AI.ChainPos(math.floor(tonumber(tp.path.id) or 0), tp.x or 0))
     end
-    -- Pick the route that (1) goes back onto the LINE - the proper track change, never
-    -- the depot - and (2) among those, throws the most of our geometric switches. The
-    -- LINE classification dominates so a depot route can never win.
+    -- Pick the route by, in order: (1) it lands on the RETURN track's chain - the line
+    -- we actually continue on, so it can't be a reversing stub or the depot; (2) it at
+    -- least lands on SOME line track; (3) it throws the most of our geometric switches.
     local maxFd = (TURNBACK_SCAN_M + 50) * AI.U_PER_M
-    local best, bestK, bestScore, bestName, bestLine
+    local best, bestK, bestScore, bestName, bestTag
     for _, sig in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sig) and istable(sig.Routes) and sig:GetPos():Distance(ref) < maxFd then
             for k, v in pairs(sig.Routes) do
@@ -326,10 +344,16 @@ function DRIVER:OpenTurnbackRoute()
                     for _, e in ipairs(string.Explode(",", v.Switches)) do
                         if e ~= "" and e:sub(-1) == "-" and want[e:sub(1, -2):upper()] then overlap = overlap + 1 end
                     end
-                    local line  = leadsToLine(v.NextSignal)
-                    local score = (line and 100 or 0) + overlap
+                    local dci      = destChain(v.NextSignal)
+                    local onReturn = dci and self.returnChainCi and dci == self.returnChainCi or false
+                    local line     = dci and AI.IsLinePath
+                                     and (byName[v.NextSignal] and istable(byName[v.NextSignal].TrackPosition)
+                                          and byName[v.NextSignal].TrackPosition.path
+                                          and AI.IsLinePath(math.floor(tonumber(byName[v.NextSignal].TrackPosition.path.id) or 0))) or false
+                    local score    = (onReturn and 1000 or 0) + (line and 100 or 0) + overlap
                     if score > 0 and (not bestScore or score > bestScore) then
-                        best, bestK, bestScore, bestName, bestLine = sig, k, score, v.RouteName, line
+                        best, bestK, bestScore, bestName = sig, k, score, v.RouteName
+                        bestTag = onReturn and "-> RETURN LINE" or (line and "-> line (maybe stub)" or "geometric")
                     end
                 end
             end
@@ -349,8 +373,7 @@ function DRIVER:OpenTurnbackRoute()
     end
     if #list > 0 then self.turnbackSwitches = list end
     self.turnbackRoute = string.format("%s #%s '%s' [%s]",
-        tostring(best.Name), tostring(bestK), tostring(bestName or "?"),
-        bestLine and "-> LINE" or "geometric (no line route found)")
+        tostring(best.Name), tostring(bestK), tostring(bestName or "?"), tostring(bestTag))
     return true
 end
 
@@ -382,7 +405,7 @@ function DRIVER:MaintainTurnback()
             self:OpenTurnbackRoute()
         end
     else
-        self.turnbackSwitches, self.turnbackRoute = nil, nil
+        self.turnbackSwitches = nil   -- keep turnbackRoute so !ai term still shows what we lined
     end
 end
 
