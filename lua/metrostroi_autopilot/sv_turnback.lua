@@ -26,6 +26,7 @@ local U_PER_M  = AI.U_PER_M
 local TURNBACK_SCAN_M, TURNBACK_NEAR_U = C.TURNBACK_SCAN_M, C.TURNBACK_NEAR_U
 
 local LEG_SETTLE = 0.6   -- seconds to let a just-opened leg's points settle before we roll in
+local LEG_BUILD_MAX = 8  -- ... but never wait longer than this for the interlocking to flag our route
 local THROAT_M   = 180   -- a turn-back crossover's first switch is within this of us; farther
                          -- means a junction past the local throat (e.g. a different terminus's
                          -- running-line scissors) that we should NOT divert toward instead of
@@ -274,6 +275,16 @@ function DRIVER:LegSwitchesSet(leg)
     return true
 end
 
+-- Has the interlocking actually BUILT our route yet? OpenRoute throws the switches at once,
+-- but the signal's own logic takes ~1 s to match those switches and make OUR route the active
+-- one (self.Route). Until then the route is still "building" and the signal ahead is red - we
+-- must not roll in. self.Route is the index the signal recognises as set; leg.k is ours.
+function DRIVER:LegRouteBuilt(leg)
+    local s = leg.sig
+    if not IsValid(s) then return true end
+    return s.Route == leg.k
+end
+
 -- Is the route's OWN signal holding us at stop? The interlocking drops a signal to stop for
 -- an occupied/conflicting block ahead - the authoritative "do not proceed". We read the same
 -- flags the driver's SignalStop uses, MINUS ARSSpeedLimit (a turn-back throat is often un-
@@ -384,15 +395,22 @@ function DRIVER:TurnbackThink(now, dt, speed)
     -- crossover ahead is clear of any other train. One-time per leg (once moving we don't
     -- re-check, or our own train on the points would read as "occupied").
     if not leg.ready then
-        local stopSig = self:LegSignalAtStop(leg)                 -- interlocking says: do not proceed
-        local blocked = stopSig or self:ThroatOccupied(leg)       -- + a physical wagon on the points
-        if now >= (leg.openedAt or 0) + LEG_SETTLE and self:LegSwitchesSet(leg) and not blocked then
+        local heldFor     = now - (leg.openedAt or 0)
+        local switchesSet = self:LegSwitchesSet(leg)
+        local stopSig     = self:LegSignalAtStop(leg)             -- interlocking says: do not proceed
+        local blocked     = stopSig or self:ThroatOccupied(leg)   -- + a physical wagon on the points
+        local built       = self:LegRouteBuilt(leg)               -- interlocking made OUR route active
+        -- Normal: route built + points set + settle elapsed + nothing blocking. Fallback: if
+        -- the interlocking never flags our route (a self.Route quirk) but the points ARE set
+        -- and nothing blocks, go after LEG_BUILD_MAX so we can't hang forever.
+        if not blocked and switchesSet
+           and ((heldFor >= LEG_SETTLE and built) or heldFor >= LEG_BUILD_MAX) then
             leg.ready = true
         else
             self:ApplyDrive(0, AI.HOLD_BRAKE)
             self:SetStatus("TURNBACK " .. tb.phase .. (blocked
                 and (stopSig and " (signal at stop - waiting)" or " (throat occupied - waiting)")
-                or " (lining route)"))
+                or ((built and switchesSet) and " (settling)" or " (building route)")))
             return
         end
     end
