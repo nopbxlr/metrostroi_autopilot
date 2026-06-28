@@ -330,7 +330,7 @@ function DRIVER:TurnbackThink(now, dt, speed)
                 if leg then
                     self:CloseLeg(tb.leg)                        -- clear leg-1's switches first
                     tb.leg = leg; tb.phase = "LEG2"; self:OpenLeg(leg)
-                else self.tb = nil end                           -- one reversal only: stop cleanly
+                else self:CloseLeg(tb.leg); self.tb = nil end    -- no leg 2: straighten & stop cleanly
             end
         end
         return
@@ -340,8 +340,11 @@ function DRIVER:TurnbackThink(now, dt, speed)
     local leg = tb.leg
     self:HoldLeg(leg, now)
 
-    -- LEG2 complete: back on the return line and clear of the points.
-    if tb.phase == "LEG2" and self:OnReturnTrack() and self:LegSwitchesCleared(leg) then
+    -- LEG2 complete: once the whole train is CLEAR of the come-back crossover we're on the
+    -- return path heading out, so hand back to normal driving (it accelerates and stops at
+    -- stations). Do NOT wait for OnReturnTrack - the return line spans several chains and the
+    -- platform's chain can be far ahead, which left us crawling past every station in LEG2.
+    if tb.phase == "LEG2" and self:LegSwitchesCleared(leg) then
         self:CloseLeg(leg)                                       -- straighten the throat behind us
         self.tb = nil; self:SetStatus("TURNBACK done"); return
     end
