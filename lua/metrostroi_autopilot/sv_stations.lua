@@ -86,10 +86,19 @@ end
 -- sensibly within the platform; otherwise EXACTLY as before - the platform end
 -- furthest along travel, so the whole train berths within the platform.
 function DRIVER:PlatformStopPoint(pf)
-    local stop = self:PAStopFor(pf)
-    if stop then return stop end
-    local a, b = pf.PlatformStart, pf.PlatformEnd
-    return (self:ForwardDist(a) > self:ForwardDist(b)) and a or b
+    local a, b   = pf.PlatformStart, pf.PlatformEnd
+    local fa, fb = self:ForwardDist(a), self:ForwardDist(b)
+    local far    = (fa > fb) and a or b               -- platform end furthest along travel (deep berth)
+    local stop   = self:PAStopFor(pf)
+    if stop then
+        -- Use the authored PA berth only when it's a sensible FRONT-of-train stop: in the
+        -- FORWARD half of the platform. A station's two faces share a StationIndex, so the
+        -- nearest-matched marker can be the OPPOSITE direction's berth, pinned to OUR near
+        -- end - berthing there leaves the train hanging out the entrance (706 from 705). In
+        -- that case berth at the far end so the whole train sits inside the platform.
+        if self:ForwardDist(stop) >= (fa + fb) * 0.5 then return stop end
+    end
+    return far
 end
 
 -- The best-matching PA station record for this platform (stop pos / terminus flag
