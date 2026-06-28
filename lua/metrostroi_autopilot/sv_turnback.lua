@@ -123,9 +123,16 @@ function DRIVER:PlanTurnback()
                     -- switches for THAT track's move; our train follows the half-set points
                     -- into the wrong place. (Once we reverse onto ch4, RCAK7 *is* on our
                     -- chain and becomes the correct leg-2.)
-                    if divertFd and maxfd and maxfd > -HALF_CAR and chainOf(sig.Name) == ourCh then
+                    -- The signal must be one we're APPROACHING (ahead of us, facing our way).
+                    -- Two signals govern the same scissors from opposite ends - e.g. KS30
+                    -- (faces arrivals, north of the throat) and KSB (faces the reversed train);
+                    -- only the one we're rolling toward is OURS. A signal behind us governs the
+                    -- other direction.
+                    local sigFd = self:ForwardDist(sig:GetPos()) / U_PER_M
+                    if divertFd and maxfd and maxfd > -HALF_CAR and chainOf(sig.Name) == ourCh
+                       and sigFd > -HALF_CAR / U_PER_M then
                         cands[#cands + 1] = { sig = sig, k = k, name = v.RouteName,
-                                              switches = v.Switches, divertFd = divertFd,
+                                              switches = v.Switches, divertFd = divertFd, sigFd = sigFd,
                                               nextSig = v.NextSignal, landCh = chainOf(v.NextSignal) }
                     end
                 end
@@ -233,7 +240,15 @@ function DRIVER:PlanTurnback()
             local named   = setNamed[keyOf(ourCh, c.switches)] == true
             local h       = hopsToReturn(c.nextSig)                 -- display / tie-break only
             local thisNamed = c.name ~= nil and c.name ~= "" and 1 or 0  -- show the named copy
-            local score = kind * 1e7 + (named and 1e5 or 0) + thisNamed - (h or 0) * 1e3 - c.divertFd / U_PER_M
+            -- Then prefer the route on the signal we're APPROACHING (nearest ahead) - the one
+            -- governing OUR move. Two signals govern a scissors from opposite ends (KS30 vs KSB,
+            -- AK1 vs RCAK7); only the near one is ours. This sits under kind/named so it just
+            -- breaks ties among otherwise-equal routes; then fewer hops, then nearest switch.
+            local score = kind * 1e7 + (named and 1e5 or 0)
+                          - math.max(0, c.sigFd or 0) * 1e2
+                          - (h or 0) * 1e1
+                          - (c.divertFd / U_PER_M) * 1e-1
+                          + thisNamed * 1e-2
             if not bestScore or score > bestScore then best, bestScore, c.kind, c.hops = c, score, kind, h end
         end
     end
