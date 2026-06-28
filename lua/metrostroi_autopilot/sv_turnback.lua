@@ -24,11 +24,7 @@ local C        = AI.C
 local HALF_CAR = AI.HALF_CAR
 local U_PER_M  = AI.U_PER_M
 local TURNBACK_SCAN_M, TURNBACK_NEAR_U = C.TURNBACK_SCAN_M, C.TURNBACK_NEAR_U
-local ARRIVE_SPEED, TERMINUS_BUFFER = C.ARRIVE_SPEED, C.TERMINUS_BUFFER
 
-local PROBE_M    = 220   -- how far ahead to watch for the buffer while crawling a leg
-local CLOSE_END_M = 45   -- only a buffer THIS close (a dead-end stub) stops a leg; a farther
-                         -- one is past where the crossover diverts us, so it must not brake us
 local THROAT_M   = 180   -- a turn-back crossover's first switch is within this of us; farther
                          -- means a junction past the local throat (e.g. a different terminus's
                          -- running-line scissors) that we should NOT divert toward instead of
@@ -362,23 +358,12 @@ function DRIVER:TurnbackThink(now, dt, speed)
         self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TURNBACK reverse"); return
     end
 
-    -- Still threading the points: CRAWL forward (Drive brakes us down to the crawl speed
-    -- on the approach, so the bogeys take the diverging frogs slowly). Do NOT brake for a
-    -- far buffer - the crossover diverts us onto another track well before it, so braking
-    -- for it would freeze us on the approach and we'd never reach the points (the AK
-    -- "no movement" / 210 m-away buffer bug). Only a buffer that's genuinely CLOSE means a
-    -- dead-end stub we're about to hit: ease to it and reverse there.
-    local target = crawl
-    local endM   = self:TrackEndAhead(PROBE_M)
-    if endM and endM < CLOSE_END_M then
-        local aim = endM - TERMINUS_BUFFER
-        if speed <= ARRIVE_SPEED and aim <= 1.2 then
-            self:FlipDirection(now)
-            tb.phase, tb.holdUntil = "REVERSE", now + 5
-            self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TURNBACK reverse"); return
-        end
-        target = math.min(target, self:StopSpeed(math.max(0, aim)))
-    end
-    self:Drive(target, speed, dt)
-    self:SetStatus(string.format("TURNBACK %s %d/%d", tb.phase, math.Round(speed), math.Round(target)))
+    -- CRAWL: LEG1 forward to clear the points (it reverses above once across), LEG2 forward
+    -- to the return line (the LEG2-complete check finishes us when OnReturnTrack). We do NOT
+    -- consult the end-of-track probe here: it false-fires on the sharp S-curve through a
+    -- crossover and would bounce us back mid-throat. A committed leg always reaches the
+    -- return or clears onto a tail we reverse off above, so no buffer stop is needed. Drive
+    -- brakes us down to the crawl speed on the run-in, so the bogeys take the frogs slowly.
+    self:Drive(crawl, speed, dt)
+    self:SetStatus(string.format("TURNBACK %s %d/%d", tb.phase, math.Round(speed), math.Round(crawl)))
 end
