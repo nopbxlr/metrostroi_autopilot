@@ -418,6 +418,20 @@ function DRIVER:TurnbackThink(now, dt, speed)
         self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TURNBACK reverse"); return
     end
 
+    -- KEEP OBEYING a red signal while crawling - not just at the leg's start gate. If the
+    -- signal governing us is held at STOP for an occupied / closed block AHEAD, brake and
+    -- wait; we don't run it just because we're mid-turn-back. We test the occupancy/closure
+    -- flags (Occupied/Close/KGU), NOT the ARS code - a turn-back throat is un-coded, so "no
+    -- code" there is not a red and must not freeze us - and only for a signal ahead of us (a
+    -- stale signal behind, or one our own train sits on, must not count).
+    local rs = self.arsSignal
+    if IsValid(rs) and (rs.Occupied or rs.Close or rs.KGU)
+       and self:ForwardDist(rs:GetPos()) > HALF_CAR then
+        self:ApplyDrive(0, AI.HOLD_BRAKE)
+        self:SetStatus("TURNBACK " .. tb.phase .. " (held at red signal ahead)")
+        return
+    end
+
     -- CRAWL: LEG1 forward to clear the points (it reverses above once across), LEG2 forward
     -- to the return line (the LEG2-complete check finishes us when OnReturnTrack). We do NOT
     -- consult the end-of-track probe here: it false-fires on the sharp S-curve through a
