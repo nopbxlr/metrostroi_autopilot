@@ -139,11 +139,13 @@ function DRIVER:BeginReverse(now)
     if self.turnbackSwitches and #self.turnbackSwitches > 0 then
         local ids = {}
         for _, sw in ipairs(self.turnbackSwitches) do
-            pcall(sw.SendSignal, sw, "alt", nil)
+            pcall(sw.SendSignal, sw, "alt", nil, true)   -- route=true: force, like the interlocking does
             ids[#ids + 1] = sw:GetNW2String("ID", "?")
         end
+        self:OpenTurnbackRoute()                          -- line + HOLD them the mapper's way
+        self.nextRouteReopen = now + 1.5
         if AI.CVars.debug:GetInt() == 1 then
-            AI.Msg("turnback: throwing crossover ", table.concat(ids, "+"))
+            AI.Msg("turnback: ", table.concat(ids, "+"), "  route: ", tostring(self.turnbackRoute))
         end
     end
     self:SetStatus("TERMINUS")
@@ -208,9 +210,50 @@ function DRIVER:FindTurnbackSwitches()
     return out
 end
 
+-- Ask the interlocking to line the turn-back crossover the mapper's way: find the
+-- signal route that throws the switches we picked to "alt" and OpenRoute it - the
+-- in-code equivalent of "!sopen <route>". This is what actually HOLDS the points:
+-- a raw SendSignal on an interlocked switch is reverted to main by the route
+-- system (which is why the crossover never diverted us, even though we were
+-- "throwing" it). Returns false (and the raw SendSignal fallback still runs) on
+-- maps whose switches aren't route-controlled.
+function DRIVER:OpenTurnbackRoute()
+    local want, n = {}, 0
+    for _, sw in ipairs(self.turnbackSwitches or {}) do
+        if IsValid(sw) then
+            local id = (sw:GetNW2String("ID", "") or ""):upper()
+            if id ~= "" and not want[id] then want[id] = true; n = n + 1 end
+        end
+    end
+    if n == 0 then return false end
+    -- the right route is the one that throws the MOST of our switches to alt ("-")
+    local bestSig, bestK, bestScore, bestName
+    for _, sig in ipairs(ents.FindByClass("gmod_track_signal")) do
+        if IsValid(sig) and istable(sig.Routes) then
+            for k, v in pairs(sig.Routes) do
+                if istable(v) and isstring(v.Switches) and v.Switches ~= "" then
+                    local score = 0
+                    for _, e in ipairs(string.Explode(",", v.Switches)) do
+                        if e ~= "" and e:sub(-1) == "-" and want[e:sub(1, -2):upper()] then score = score + 1 end
+                    end
+                    if score > 0 and (not bestScore or score > bestScore) then
+                        bestSig, bestK, bestScore, bestName = sig, k, score, v.RouteName
+                    end
+                end
+            end
+        end
+    end
+    if not bestSig then self.turnbackRoute = "no signal route lines those switches"; return false end
+    pcall(bestSig.OpenRoute, bestSig, bestK)
+    self.turnbackRoute = string.format("%s #%s '%s' (lines %d/%d of our switches)",
+        tostring(bestSig.Name), tostring(bestK), tostring(bestName or "?"), bestScore, n)
+    return true
+end
+
 -- Hold the turn-back crossover thrown until we've driven past it. Switches auto-
 -- revert to "main" after ~20 s and refuse to move under an occupied segment, so
--- we re-assert every tick (which also resets their revert timer).
+-- we re-assert every tick (which also resets their revert timer) and re-open the
+-- mapper's route periodically so the interlocking keeps the points for us.
 function DRIVER:MaintainTurnback()
     local list = self.turnbackSwitches
     if not (list and #list > 0) then self.turnbackSwitches = nil return end
@@ -224,11 +267,19 @@ function DRIVER:MaintainTurnback()
     local anyAhead = false
     for _, sw in ipairs(list) do
         if IsValid(sw) and (sw:GetPos():Dot(self.travelDir) - tailAlong) >= -AI.HALF_CAR then
-            pcall(sw.SendSignal, sw, "alt", nil)
+            pcall(sw.SendSignal, sw, "alt", nil, true)
             anyAhead = true
         end
     end
-    if not anyAhead then self.turnbackSwitches = nil end
+    if anyAhead then
+        local now = CurTime()
+        if now >= (self.nextRouteReopen or 0) then     -- keep the mapper's route lined for us
+            self.nextRouteReopen = now + 1.5
+            self:OpenTurnbackRoute()
+        end
+    else
+        self.turnbackSwitches, self.turnbackRoute = nil, nil
+    end
 end
 
 --------------------------------------------------------------------------------
