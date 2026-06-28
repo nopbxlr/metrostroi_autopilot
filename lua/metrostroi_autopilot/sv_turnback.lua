@@ -107,7 +107,12 @@ function DRIVER:PlanTurnback()
                             end
                         end
                     end
-                    if divertFd and maxfd and maxfd > -HALF_CAR then
+                    -- The route's SIGNAL must govern OUR track. A route written on a signal
+                    -- on another chain (RCAK7 on ch4 while we're on ch1) only sets the throat
+                    -- switches for THAT track's move; our train follows the half-set points
+                    -- into the wrong place. (Once we reverse onto ch4, RCAK7 *is* on our
+                    -- chain and becomes the correct leg-2.)
+                    if divertFd and maxfd and maxfd > -HALF_CAR and chainOf(sig.Name) == ourCh then
                         cands[#cands + 1] = { sig = sig, k = k, name = v.RouteName,
                                               switches = v.Switches, divertFd = divertFd,
                                               landCh = chainOf(v.NextSignal) }
@@ -158,13 +163,21 @@ function DRIVER:PlanTurnback()
             if not bestScore or score > bestScore then best, bestScore, c.kind = c, score, kind end
         end
     end
-    if not best then self.tbPlanStr = "no turn-back crossover ahead"; return nil end
+    if not best then self.tbPlanStr = "no turn-back crossover on our track ahead"; return nil end
     local kindStr = ({ [3] = "DIRECT", [2] = "via-tail", [1] = "tail", [0] = "stub" })[best.kind or 0]
     self.tbPlanStr = string.format("%s #%s '%s' sw=%s -> %s (%s)%s @%dm",
         tostring(best.sig.Name), tostring(best.k), tostring(best.name or "?"), tostring(best.switches),
         best.landCh and ("ch" .. best.landCh) or "stub", kindStr,
         (returnCh and best.landCh == returnCh) and " <<RETURN" or "",
         math.Round(best.divertFd / U_PER_M))
+    -- Only COMMIT a leg that actually reaches the return track - DIRECT (lands on it) or
+    -- VIA-TAIL (a tail one leg short of it). A bare stub/dead-tail (kind < 2) is never the
+    -- maneuver: holding for a better position (the scissors entry still ahead) beats
+    -- diverting onto a dead pull-track and oscillating on it (the SV2005 trap).
+    if (best.kind or 0) < 2 then
+        self.tbPlanStr = self.tbPlanStr .. "  [not committed: no through route]"
+        return nil
+    end
     return best
 end
 

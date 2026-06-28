@@ -336,9 +336,13 @@ function DRIVER:Think(now)
     -- ends ahead. Plan and start the cross -> reverse -> return maneuver; from here the
     -- engine (self.tb) owns the train. If there is no crossover route at all, StartTurnback
     -- returns false and the end-of-track block below stops & reverses on the spot.
+    -- Look early (rail end within 300 m) so the crossover's ENTRY switch is still ahead of
+    -- us when we plan - committing late, after we've rolled past the scissors entry, leaves
+    -- only a dead stub reachable. StartTurnback only commits a leg that reaches the return,
+    -- so trying eagerly each tick simply commits as soon as a good plan appears.
     if AI.CVars.terminus_rev:GetInt() == 1 and not pf and not self.arsReverseCooldown
        and not self:RecentlyReversedNear(now) and now >= (self.nextTbTry or 0)
-       and (self.servedIsTerminus or self:TrackEndAhead(240)) then
+       and (self.servedIsTerminus or self:TrackEndAhead(300)) then
         self.nextTbTry = now + 0.5
         if self:StartTurnback(now) then return end
     end
