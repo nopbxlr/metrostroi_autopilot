@@ -214,6 +214,7 @@ end
 
 function DRIVER:BeginReverse(now)
     self:NoteReverse(now)            -- remember this spot so we can't oscillate back to it
+    self.turnbackRouteRef = nil      -- new phase/direction: re-evaluate the turn-back route
     self.travelDir = -self.travelDir
     self.servedPlatform = nil
     self.power = 0
@@ -354,6 +355,17 @@ end
 function DRIVER:OpenTurnbackRoute()
     local head = self:GetHead()
     if not IsValid(head) then return false end
+    -- Crossed onto the return track? The maneuver is done; drop the route lock.
+    if self:OnReturnTrack() then self.turnbackRouteRef = nil; return false end
+    -- LOCKED: once we've committed to a turn-back route, keep re-opening that SAME
+    -- route (holding its points) - do NOT re-select. Choosing a different route once
+    -- the train is mid-scissors swings switches under it and derails it (we picked
+    -- AK2-4 on our track, then AK4-1 once on the scissors, mixing the point settings).
+    local lk = self.turnbackRouteRef
+    if lk and IsValid(lk.sig) and istable(lk.sig.Routes) and istable(lk.sig.Routes[lk.k]) then
+        pcall(lk.sig.OpenRoute, lk.sig, lk.k)
+        return true
+    end
     local ref = head:GetPos()
     local dir = isvector(self.travelDir) and self.travelDir or head:GetForward()
     local returnCi = self:ReturnTrackChain()
@@ -481,6 +493,7 @@ function DRIVER:OpenTurnbackRoute()
         end
     end
     if not best then self.turnbackRoute = "no diverting route nearby"; return false end
+    self.turnbackRouteRef = { sig = best, k = bestK }   -- commit & lock this route
     pcall(best.OpenRoute, best, bestK)
     -- Adopt ONLY the route's alt ("-") switches so MaintainTurnback re-asserts the
     -- right set; the "+" (main) switches are handled by re-opening the route, and
