@@ -457,15 +457,23 @@ function DRIVER:OpenTurnbackRoute()
                         -- hops / nearest crossover. No switch-overlap (it fed back on its
                         -- own pick); these are all geometric and stable.
                         local onOurChain = ourChain and chainOf(sig.Name) == ourChain or false
-                        local score = (onOurChain and 5e6 or 0)
-                                      + ((h ~= nil) and (1e6 + ourDivert * 1e4 - h * 3e3 - (nearAbs or 0))
-                                         or (ourDivert > 0 and 5e5 or (line and 1 or 0)))
-                        if score > 0 and (not bestScore or score > bestScore) then
+                        -- This is just the route written on the signal we're approaching:
+                        -- on OUR track, diverting OUR rail, nearest ahead - exactly what
+                        -- "!sopen <that route>" does by hand. Whether it FORWARD-reaches
+                        -- the return track is only a tiny nudge, because the real move
+                        -- threads the scissors/sidings first (AK2-4 doesn't forward-reach
+                        -- it, yet it's the correct route), so that test must NOT dominate.
+                        local score = (onOurChain and 1e7 or 0)
+                                      + (ourDivert > 0 and 1e6 or 0)
+                                      + (h ~= nil and 1e3 or 0)
+                                      - (nearAbs or 0)
+                        if (onOurChain or ourDivert > 0 or h ~= nil or line)
+                           and (not bestScore or score > bestScore) then
                             best, bestK, bestScore, bestName = sig, k, score, v.RouteName
                             bestTag = string.format("%s%s",
                                 onOurChain and "OUR-track " or "OTHER-track ",
-                                (h ~= nil) and string.format("-> RETURN in %d hop(s)", h)
-                                or (ourDivert > 0 and "-> diverts our rail" or "-> line"))
+                                ourDivert > 0 and "diverts our rail"
+                                or (h ~= nil and string.format("-> RETURN %dhop", h) or "-> line"))
                         end
                     end
                 end
