@@ -93,7 +93,10 @@ include("metrostroi_autopilot/sv_driver.lua")
 include("metrostroi_autopilot/sv_lookahead.lua")   -- DRIVER methods: ARS, signals, curves, trains ahead
 include("metrostroi_autopilot/sv_stations.lua")    -- DRIVER methods: platforms, terminus, doors
 include("metrostroi_autopilot/sv_regulation.lua")
-include("metrostroi_autopilot/sv_commands.lua")
+include("metrostroi_autopilot/sv_util.lua")        -- shared command/map helpers (AI.*)
+include("metrostroi_autopilot/sv_commands.lua")    -- player console & chat commands
+include("metrostroi_autopilot/sv_diagnostics.lua") -- ars/door/term/reg debug commands
+include("metrostroi_autopilot/sv_map.lua")         -- track-network map networking
 
 -- Train profiles (one per supported model/family)
 include("metrostroi_autopilot/trains/sv_717.lua")
