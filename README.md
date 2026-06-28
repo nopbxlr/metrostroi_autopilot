@@ -49,16 +49,18 @@ You must be an admin (single‑player counts).
 | Command | What it does |
 |---|---|
 | `metrostroi_ai_add` | Make the train you're **looking at** drive itself. |
-| `metrostroi_ai_spawn <class> <cars>` | Build an AI consist on the track you aim at. e.g. `metrostroi_ai_spawn 717 4` |
 | `metrostroi_ai_remove [all]` | Stop AI on the aimed train, or `all` of them. |
+| `metrostroi_ai_status` | List where every train (AI + manual) is. |
+| `metrostroi_ai_tp <#>` | Board an AI train's forward cab. |
+| `metrostroi_ai_map` | Open the track-network map window. |
 | `metrostroi_ai_list` | List the active AI trains. |
 | `metrostroi_ai_help` | Print help. |
 
-In chat: `!ai`, `!ai spawn 717 4`, `!ai remove`, `!ai remove all`, `!ai list`.
+In chat: `!ai`, `!ai status`, `!ai tp 2`, `!ai map`, `!ai remove`, `!ai remove all`, `!ai list`.
 
 **Quickest start:** spawn a train normally with the Metrostroi *Train Spawner*
-tool, sit it on the track, aim at it and type `metrostroi_ai_add`. Or just
-`!ai spawn 717 4` while looking at a track.
+tool, sit it on the track, aim at it and type `metrostroi_ai_add`. (Spawning is
+intentionally left to the Train Spawner — this addon only drives existing trains.)
 
 ## Tuning (console variables)
 
@@ -92,9 +94,8 @@ tool, sit it on the track, aim at it and type `metrostroi_ai_add`. Or just
   not physically open. The train still stops and dwells. Hooks
   `MetrostroiAI.StationStop(driver, platform)` and `MetrostroiAI.Depart(driver)`
   are provided so you can wire up doors/announcements yourself.
-- **Spawned consists** are coupled with the same routine the stock spawner uses.
-  If a consist doesn't fully couple, the autopilot still drives the lead car; the
-  most reliable route is to spawn with the Train Spawner tool and `metrostroi_ai_add`.
+- **Spawning** is intentionally not handled here — spawn (and couple) trains with
+  the Metrostroi *Train Spawner* tool, then `metrostroi_ai_add` to drive them.
 - Removing AI (`metrostroi_ai_remove`) restores normal manual control
   (`IgnoreEngine` is cleared), so you can hop in and drive afterwards.
 
@@ -107,5 +108,4 @@ end)
 hook.Add("MetrostroiAI.Depart", "MyDoors", function(driver) end)
 
 local ok, driver = MetrostroiAI.Engage(someTrainEntity)   -- programmatic
-MetrostroiAI.SpawnConsist(ply, "gmod_subway_81-717_mvm", 4)
 ```

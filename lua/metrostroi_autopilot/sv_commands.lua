@@ -84,59 +84,6 @@ function AI.CmdRemove(ply, args)
     tell(ply, "that train is not on AI.")
 end
 
-function AI.CmdSpawn(ply, args)
-    if not canUse(ply) then return tell(ply, "admins only.") end
-    local class = args[1]
-    -- allow shorthand like "81-717" or "717" -> try the real class names
-    if class and not scripted_ents.GetStored(class) then
-        local found
-        for _, c in ipairs({
-            "gmod_subway_" .. class,
-            "gmod_subway_81-" .. class,
-            "gmod_subway_81-" .. class .. "_mvm",
-            "gmod_subway_81-" .. class .. "_lvz",
-            "gmod_subway_" .. class .. "_mvm",
-        }) do
-            if scripted_ents.GetStored(c) then found = c break end
-        end
-        class = found
-    end
-    if not (class and scripted_ents.GetStored(class)) then
-        class = "gmod_subway_81-717_mvm"   -- safe default if unresolved
-    end
-    local cars = tonumber(args[2]) or 4
-    local ok, err = AI.SpawnConsist(ply, class, cars)
-    if ok then tell(ply, "spawning ", cars, "-car ", class, " ... it will couple and start driving shortly.")
-    else tell(ply, "spawn failed: ", tostring(err)) end
-end
-
--- Force-couple a consist that didn't auto-couple (tool-spawned or otherwise).
-function AI.CmdCouple(ply)
-    if not canUse(ply) then return tell(ply, "admins only.") end
-    local t = resolveTrain(ply)
-    if IsValid(t) and t.GetNW2Entity then
-        local p = t:GetNW2Entity("TrainEntity")
-        if IsValid(p) then t = p end
-    end
-    if not (IsValid(t) and (t.FrontCouple or t.RearCouple)) then
-        return tell(ply, "aim at a Metrostroi train car.")
-    end
-    -- gather nearby cars, order them along the aimed car's axis, couple neighbours
-    local cars = {}
-    for _, e in ipairs(ents.FindInSphere(t:GetPos(), 1600)) do
-        if IsValid(e) and (e.FrontCouple or e.RearCouple) and (e.FrontBogey or e.RearBogey) then
-            cars[#cars + 1] = e
-        end
-    end
-    if #cars < 2 then return tell(ply, "no neighbouring cars found within range.") end
-    local fwd = t:GetForward()
-    table.sort(cars, function(a, b) return a:GetPos():Dot(fwd) < b:GetPos():Dot(fwd) end)
-    local n = 0
-    for i = 1, #cars - 1 do
-        if AI.ForceCouple(cars[i], cars[i + 1], 700) then n = n + 1 end
-    end
-    tell(ply, "force-coupled ", n, " joint(s) across ", #cars, " cars.")
-end
 
 function AI.CmdList(ply)
     local n = 0
@@ -155,12 +102,11 @@ function AI.CmdHelp(ply)
     local L = {
         "Metrostroi Autopilot commands:",
         "  metrostroi_ai_add            - make the train you aim at drive itself",
-        "  metrostroi_ai_spawn C N      - spawn an N-car AI train of class C on the track you aim at",
         "  metrostroi_ai_remove [all]   - stop AI on the aimed train (or 'all')",
         "  metrostroi_ai_status         - where every train (AI + manual) is",
         "  metrostroi_ai_tp <#>         - board an AI train's forward cab",
         "  metrostroi_ai_map            - open the track-network map window",
-        "  chat: !ai  |  !ai spawn 717 4  |  !ai status  |  !ai tp 2  |  !ai map",
+        "  chat: !ai  |  !ai add  |  !ai status  |  !ai tp 2  |  !ai map",
         "  tuning cvars: metrostroi_ai_cruise_speed, _dwell, _decel, _accel, _obey_signals ...",
     }
     for _, line in ipairs(L) do tell(ply, line) end
@@ -535,8 +481,6 @@ concommand.Add("metrostroi_ai_add",    function(ply) AI.CmdAdd(ply) end)
 concommand.Add("metrostroi_ai_arsdebug", function(ply) AI.CmdArsDebug(ply) end)
 concommand.Add("metrostroi_ai_doordebug", function(ply) AI.CmdDoorDebug(ply) end)
 concommand.Add("metrostroi_ai_remove", function(ply, _, a) AI.CmdRemove(ply, a) end)
-concommand.Add("metrostroi_ai_spawn",  function(ply, _, a) AI.CmdSpawn(ply, a) end)
-concommand.Add("metrostroi_ai_couple", function(ply) AI.CmdCouple(ply) end)
 concommand.Add("metrostroi_ai_list",   function(ply) AI.CmdList(ply) end)
 concommand.Add("metrostroi_ai_help",   function(ply) AI.CmdHelp(ply) end)
 
@@ -551,9 +495,7 @@ hook.Add("PlayerSay", "MetrostroiAI.Chat", function(ply, text)
     local rest = { parts[3], parts[4] }
 
     if sub == "" or sub == "add" or sub == "drive" then AI.CmdAdd(ply)
-    elseif sub == "spawn" then AI.CmdSpawn(ply, { parts[3], parts[4] })
     elseif sub == "remove" or sub == "stop" or sub == "del" then AI.CmdRemove(ply, { parts[3] })
-    elseif sub == "couple" then AI.CmdCouple(ply)
     elseif sub == "ars" then AI.CmdArsDebug(ply)
     elseif sub == "doors" or sub == "door" then AI.CmdDoorDebug(ply)
     elseif sub == "term" or sub == "terminus" then AI.CmdTermDebug(ply)

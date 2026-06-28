@@ -91,7 +91,6 @@ end
 --------------------------------------------------------------------------------
 include("metrostroi_autopilot/sv_driver.lua")
 include("metrostroi_autopilot/sv_regulation.lua")
-include("metrostroi_autopilot/sv_spawn.lua")
 include("metrostroi_autopilot/sv_commands.lua")
 
 -- Train profiles (one per supported model/family)
