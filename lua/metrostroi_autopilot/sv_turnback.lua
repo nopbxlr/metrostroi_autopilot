@@ -72,6 +72,16 @@ function DRIVER:PlanTurnback()
     local ref      = head:GetPos()
     local dir      = isvector(self.travelDir) and self.travelDir or head:GetForward()
 
+    -- If the return track resolves to OUR OWN chain, ReturnTrackChain couldn't find the
+    -- opposite running track (e.g. no dwell-recorded face yet and the geometric fallback
+    -- landed on us). Every "cross to the return" route is then degenerate - it crosses back
+    -- onto our own track and derails. Don't attempt a crossover: leave it to the plain
+    -- reverse-on-the-spot fallback. (Also the correct behaviour for a true single-track stub.)
+    if returnCh and ourCh and returnCh == ourCh then
+        self.tbPlanStr = "return track == our track - no crossover (reverse on the spot)"
+        return nil
+    end
+
     -- signal name -> chain it sits on
     local byName = {}
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
