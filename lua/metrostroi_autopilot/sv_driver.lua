@@ -397,7 +397,12 @@ function DRIVER:Think(now)
     -- blip can never brake or reverse the train. The cooldown (cleared on re-
     -- acquiring a code, set by BeginReverse) lets the reversed train drive back off
     -- the un-coded stub instead of instantly re-detecting the end behind it.
-    if self:ARSLost(now) and not pf and not self.arsReverseCooldown then
+    -- While committed to a turn-back route and still threading the crossover, the
+    -- only thing allowed to reverse us is the "fully crossed" trigger above - NOT the
+    -- end-of-track detector, which false-fires on the sharp scissors S-curve and would
+    -- stop us dead on the points and bounce us back the way we came.
+    local crossingTurnback = self.turnbackRouteRef and not self.turnbackCrossed
+    if self:ARSLost(now) and not pf and not self.arsReverseCooldown and not crossingTurnback then
         local endM = self:TrackEndAhead(200)
         if endM then
             local aim = endM - TERMINUS_BUFFER
@@ -458,7 +463,7 @@ function DRIVER:Think(now)
     -- End of track: pull into the tail track and stop precisely short of the
     -- buffer (same distance-based feedforward as the platform stop, so we never
     -- nose into the wall), then turn the train back.
-    if term then
+    if term and not crossingTurnback then
         status = "TERMINUS"
         local aim  = term - TERMINUS_BUFFER
         local sdec = math.max(0.2, AI.CVars.station_decel:GetFloat())
