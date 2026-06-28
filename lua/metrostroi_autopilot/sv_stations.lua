@@ -338,6 +338,19 @@ function DRIVER:ReturnTrackChain()
     return nil
 end
 
+-- Are we already on the return track's chain? (Once we've crossed over we must
+-- stop re-lining crossovers, or we could divert ourselves back off it.)
+function DRIVER:OnReturnTrack()
+    local rc = self:ReturnTrackChain()
+    if not (rc and AI.ChainPos) then return false end
+    local head = self:GetHead()
+    local tp = IsValid(head) and Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
+    local p = tp and tp[1]
+    if not (p and p.path) then return false end
+    local ci = AI.ChainPos(math.floor(tonumber(p.path.id) or 0), p.x or 0)
+    return ci == rc
+end
+
 function DRIVER:OpenTurnbackRoute()
     local head = self:GetHead()
     if not IsValid(head) then return false end
