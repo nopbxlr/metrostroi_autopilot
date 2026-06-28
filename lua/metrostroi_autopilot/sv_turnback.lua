@@ -23,12 +23,13 @@ local DRIVER   = AI.Driver
 local C        = AI.C
 local HALF_CAR = AI.HALF_CAR
 local U_PER_M  = AI.U_PER_M
-local TURNBACK_SCAN_M, TURNBACK_NEAR_U, TURNBACK_DIAG_M =
-    C.TURNBACK_SCAN_M, C.TURNBACK_NEAR_U, C.TURNBACK_DIAG_M
+local TURNBACK_SCAN_M, TURNBACK_NEAR_U = C.TURNBACK_SCAN_M, C.TURNBACK_NEAR_U
 local ARRIVE_SPEED, TERMINUS_BUFFER, BRAKE_PER_MS2 =
     C.ARRIVE_SPEED, C.TERMINUS_BUFFER, C.BRAKE_PER_MS2
 
-local PROBE_M = 220   -- how far ahead to watch for the buffer while crawling a leg
+local PROBE_M    = 220   -- how far ahead to watch for the buffer while crawling a leg
+local THROAT_M   = 180   -- a turn-back crossover's first switch is within this of us; farther
+                         -- means an unrelated junction that merely touches the return rail
 
 -- The mechanical reverse: flip the travel sense so the bogeys drive the other way.
 -- No switch throwing here - the turn-back engine lines switches via routes only.
@@ -85,7 +86,7 @@ function DRIVER:PlanTurnback()
 
     -- candidate legs: every route that diverts our rail at a switch ahead of us
     local maxFd = (TURNBACK_SCAN_M + 50) * U_PER_M
-    local cands, nearest = {}, nil
+    local cands = {}
     for _, sig in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sig) and istable(sig.Routes) and sig:GetPos():Distance(ref) < maxFd then
             for k, v in pairs(sig.Routes) do
@@ -110,29 +111,58 @@ function DRIVER:PlanTurnback()
                         cands[#cands + 1] = { sig = sig, k = k, name = v.RouteName,
                                               switches = v.Switches, divertFd = divertFd,
                                               landCh = chainOf(v.NextSignal) }
-                        if not nearest or divertFd < nearest then nearest = divertFd end
                     end
                 end
             end
         end
     end
 
-    -- anchor to the local throat, then pick: lands on the RETURN chain (1e7) > leads to
-    -- some other real track, i.e. a tail to reverse on (1e6) > nearest entry.
-    local throat = (nearest or 0) + TURNBACK_DIAG_M * U_PER_M
+    -- Does a tail chain T reach the RETURN track in ONE more leg? (a route on a signal
+    -- sitting on T that lands on the return chain). This is what tells the AK sawtooth's
+    -- ch4 tail (RCAK7 -> AKG -> ch2) from the ch3 depot dead-end. Cached per tail.
+    local tailCache = {}
+    local function tailReachesReturn(T)
+        if not (T and returnCh) then return false end
+        if tailCache[T] ~= nil then return tailCache[T] end
+        tailCache[T] = false
+        for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
+            if IsValid(sg) and istable(sg.Routes) and chainOf(sg.Name) == T then
+                for _, r in ipairs(sg.Routes) do
+                    if istable(r) and isstring(r.Switches) and r.Switches:find("%-")
+                       and chainOf(r.NextSignal) == returnCh then tailCache[T] = true; break end
+                end
+            end
+            if tailCache[T] then break end
+        end
+        return tailCache[T]
+    end
+
+    -- Rank by HOW the leg reaches the return track, NOT by which switch is nearest - a
+    -- dead stub often diverts a nearer switch than the real return route (SV2005 'SV5-'
+    -- beating SV1R1). Within a fixed local throat (so an unrelated far junction that only
+    -- touches the line-long return rail is out):
+    --   DIRECT (3)  lands straight on the return chain (a plain scissors: SV1R1)
+    --   VIA-TAIL(2) lands on a tail from which one more leg reaches the return (AK: cross
+    --               to ch4, reverse, RCAK7 -> ch2 - the depot sawtooth)
+    --   tail (1)    lands on some other real track (best-effort)
+    --   stub (0)    dead end ('-> *')
+    -- nearest entry breaks ties within a tier.
     local best, bestScore
     for _, c in ipairs(cands) do
-        if c.divertFd <= throat then
-            local landsReturn = returnCh and c.landCh == returnCh or false
-            local real        = c.landCh ~= nil and c.landCh ~= ourCh
-            local score = (landsReturn and 1e7 or 0) + (real and 1e6 or 0) - c.divertFd / U_PER_M
-            if not bestScore or score > bestScore then best, bestScore = c, score end
+        if c.divertFd <= THROAT_M * U_PER_M then
+            local direct  = returnCh and c.landCh == returnCh or false
+            local real    = c.landCh ~= nil and c.landCh ~= ourCh
+            local viaTail = (not direct) and real and tailReachesReturn(c.landCh) or false
+            local kind  = direct and 3 or (viaTail and 2 or (real and 1 or 0))
+            local score = kind * 1e7 - c.divertFd / U_PER_M
+            if not bestScore or score > bestScore then best, bestScore, c.kind = c, score, kind end
         end
     end
     if not best then self.tbPlanStr = "no turn-back crossover ahead"; return nil end
-    self.tbPlanStr = string.format("%s #%s '%s' sw=%s -> %s%s @%dm",
+    local kindStr = ({ [3] = "DIRECT", [2] = "via-tail", [1] = "tail", [0] = "stub" })[best.kind or 0]
+    self.tbPlanStr = string.format("%s #%s '%s' sw=%s -> %s (%s)%s @%dm",
         tostring(best.sig.Name), tostring(best.k), tostring(best.name or "?"), tostring(best.switches),
-        best.landCh and ("ch" .. best.landCh) or "stub",
+        best.landCh and ("ch" .. best.landCh) or "stub", kindStr,
         (returnCh and best.landCh == returnCh) and " <<RETURN" or "",
         math.Round(best.divertFd / U_PER_M))
     return best
