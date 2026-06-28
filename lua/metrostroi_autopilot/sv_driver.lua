@@ -8,7 +8,8 @@ local AI = MetrostroiAI
 local STOP_BEFORE_SIGNAL_M = 6      -- stop this far short of a red signal
 local STATION_CORRIDOR_U   = 280    -- lateral units a platform may be from us to count as "ours"
 local TRAIN_CORRIDOR_U     = 120    -- lateral units to treat another train as "on our track"
-local TRAIN_SAFE_GAP_U     = 700    -- keep this far behind another train
+local TRAIN_SAFE_GAP_U     = 700    -- keep this far behind another train (straight-corridor scan)
+local TRAIN_SAFE_GAP_M     = 30     -- metres to keep behind the car in front (along-the-rails scan)
 local PLATFORM_CLEAR_U     = 500    -- a served platform is "left behind" past this
 local ARRIVE_SPEED         = 2.5    -- km/h, considered stopped for arrival
 local ARRIVE_TOL_M         = 4.0    -- how close the nose must be to the stop point
@@ -298,15 +299,35 @@ end
 -- Brake to a stop if the governing signal is red / its block is occupied.
 function DRIVER:SignalStop(limit)
     self.holdSignal = nil
+    self.sigStopM = nil
     if AI.CVars.obey_signals:GetInt() == 0 then return limit end
     local sig = self.arsSignal
     if not IsValid(sig) then return limit end
-    if not ((sig.ARSSpeedLimit == 0) or sig.Occupied or sig.Close or sig.KGU) then return limit end
-    local fd = self:ForwardDist(sig:GetPos())
-    if fd <= 0 then return limit end
+    -- STOP if the ARS code our cab actually RECEIVES is 0 (the authoritative test -
+    -- the raw ARSSpeedLimit field can differ for occupied/override blocks), or the
+    -- signal is otherwise red / its block occupied / closed.
+    if not ((self.arsSpeed == 0) or (sig.ARSSpeedLimit == 0) or sig.Occupied or sig.Close or sig.KGU) then
+        return limit
+    end
     self.holdSignal = true
-    local s_m = math.max(0, fd / AI.U_PER_M - STOP_BEFORE_SIGNAL_M)
-    return math.min(limit, self:StopSpeed(s_m))
+    -- distance to it: along the route when we can (so a red just around a curve
+    -- isn't read as "behind us"), else straight-line; if neither gives a sensible
+    -- positive distance, brake anyway - never roll through a stop.
+    local fd_m
+    local tpos = sig.TrackPosition
+    if self.chainCi and istable(tpos) and tpos.path then
+        local sci, scd = AI.ChainPos(math.floor(tonumber(tpos.path.id) or 0), tpos.x or 0)
+        if sci == self.chainCi and scd then
+            local d = ((self.chainDir or 1) > 0) and (scd - self.chainCd) or (self.chainCd - scd)
+            if d > 0 then fd_m = d end
+        end
+    end
+    if not fd_m then
+        local w = self:ForwardDist(sig:GetPos()) / AI.U_PER_M
+        if w > 0 then fd_m = w end
+    end
+    self.sigStopM = fd_m and math.max(0, fd_m - STOP_BEFORE_SIGNAL_M) or 0   -- m to stop at it
+    return math.min(limit, self:StopSpeed(self.sigStopM))
 end
 
 -- A dispatcher would grant the route at a red ROUTE signal we're held at (e.g. a
@@ -400,17 +421,64 @@ function DRIVER:CurveLimit(pos, limit)
 end
 
 -- Nearest other train ahead on our track (collision avoidance / unsignalled maps).
-function DRIVER:TrainLimit(limit, speed)
-    if AI.CVars.avoid_trains:GetInt() == 0 then return limit end
-    if not Metrostroi.TrainPositions then return limit end
+-- Track our position + travel direction along the stitched route, so we can look
+-- for the train/signal ahead ALONG THE RAILS instead of through a straight
+-- corridor that misses whatever is just around a curve.
+function DRIVER:UpdateRoutePos(pos)
+    self.chainCi, self.chainCd = nil, nil
+    if not (pos and pos.path and AI.ChainPos) then return end
+    local ci, cd = AI.ChainPos(math.floor(tonumber(pos.path.id) or 0), pos.x or 0)
+    if not ci then return end
+    if self.rpCi == ci and self.rpCd then
+        local d = cd - self.rpCd
+        if math.abs(d) > 0.02 then self.chainDir = d > 0 and 1 or -1 end
+    end
+    self.rpCi, self.rpCd = ci, cd
+    self.chainCi, self.chainCd, self.chainDir = ci, cd, self.chainDir
+end
 
+-- Metres to the nearest OTHER car ahead of us on our route chain (the closest
+-- such car is the rear of the train in front), or nil. Follows the rails.
+function DRIVER:RouteTrainAhead()
+    local ci, cd, dir = self.chainCi, self.chainCd, self.chainDir
+    if not (ci and cd and dir) then return nil end
     local mine = {}
     for _, w in ipairs(self.wagons) do mine[w] = true end
+    local nearest
+    for w in pairs(Metrostroi.TrainPositions or {}) do
+        if IsValid(w) and not mine[w] then
+            local wp = Metrostroi.TrainPositions[w][1]
+            if wp and wp.path then
+                local wci, wcd = AI.ChainPos(math.floor(tonumber(wp.path.id) or 0), wp.x or 0)
+                if wci == ci and wcd then
+                    local ahead = (dir > 0) and (wcd - cd) or (cd - wcd)
+                    if ahead > 0.5 and (not nearest or ahead < nearest) then nearest = ahead end
+                end
+            end
+        end
+    end
+    return nearest
+end
 
+function DRIVER:TrainLimit(limit, speed)
+    self.trainStopM = nil
+    if AI.CVars.avoid_trains:GetInt() == 0 then return limit end
+    if not Metrostroi.TrainPositions then return limit end
+    local lim = limit
+
+    -- 1) along-the-track scan: brakes for the train in front even around curves/loops
+    local routeAhead = self:RouteTrainAhead()
+    if routeAhead then
+        local m = math.max(0, routeAhead - TRAIN_SAFE_GAP_M)
+        self.trainStopM = m
+        lim = math.min(lim, self:StopSpeed(m))
+    end
+
+    -- 2) straight-corridor scan as a backup (catches trains across a chain gap)
+    local mine = {}
+    for _, w in ipairs(self.wagons) do mine[w] = true end
     local a = math.max(0.1, AI.CVars.decel:GetFloat())
-    local stopdist_u = ((speed / 3.6) ^ 2 / (2 * a)) * AI.U_PER_M
-    local range = math.max(8 * AI.U_PER_M, stopdist_u + 12 * AI.U_PER_M)
-
+    local range = math.max(8 * AI.U_PER_M, ((speed / 3.6) ^ 2 / (2 * a)) * AI.U_PER_M + 12 * AI.U_PER_M)
     local nearest
     for w in pairs(Metrostroi.TrainPositions) do
         if IsValid(w) and not mine[w] then
@@ -421,10 +489,11 @@ function DRIVER:TrainLimit(limit, speed)
         end
     end
     if nearest then
-        local s_m = math.max(0, (nearest - TRAIN_SAFE_GAP_U)) / AI.U_PER_M
-        return math.min(limit, self:StopSpeed(s_m))
+        local m = math.max(0, (nearest - TRAIN_SAFE_GAP_U) / AI.U_PER_M)
+        self.trainStopM = math.min(self.trainStopM or math.huge, m)
+        lim = math.min(lim, self:StopSpeed(m))
     end
-    return limit
+    return lim
 end
 
 --------------------------------------------------------------------------------
@@ -474,6 +543,7 @@ end
 function DRIVER:BeginStationStop(now, pf)
     self.state = "DWELL"
     self.holdUntil = now + math.max(2, AI.CVars.dwell:GetFloat())
+    self.dwellStart = now
     self.servedPlatform = pf
     self:ApplyDrive(0, AI.HOLD_BRAKE)
     if AI.CVars.open_doors:GetInt() == 1 then self:OpenDoors(pf) end
@@ -481,6 +551,39 @@ function DRIVER:BeginStationStop(now, pf)
     if IsValid(self.lead) then
         self:SetStatus("STATION " .. (pf.StationIndex or "?"))
     end
+end
+
+-- Is any OTHER train standing within a platform's length of it? (used by level-1
+-- regulation - we won't leave a station until the next one is clear).
+function DRIVER:StationOccupied(pf)
+    if not (IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd)) then return false end
+    local center = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+    local range  = pf.PlatformStart:Distance(pf.PlatformEnd) * 0.5 + 6 * AI.U_PER_M
+    local mine = {}
+    for _, w in ipairs(self.wagons) do mine[w] = true end
+    for w in pairs(Metrostroi.SpawnedTrains or {}) do
+        if IsValid(w) and not mine[w] and w:GetPos():Distance(center) < range then return true end
+    end
+    return false
+end
+
+-- Traffic regulation: should we keep holding at the platform (doors open)?
+--   1 = wait until the next station ahead is clear of any train.
+--   2 = wait until our gap to the train ahead reaches the even-spacing target
+--       (set by AI.UpdateRegulation), evening out the headway across all trains.
+function DRIVER:RegulationHold(now)
+    local reg = AI.CVars.regulation:GetInt()
+    if reg == 0 then return false end
+    if now - (self.dwellStart or now) > AI.CVars.reg_maxhold:GetFloat() then return false end  -- safety cap
+    if reg == 1 then
+        local nx = self:NextPlatform()
+        return (nx and self:StationOccupied(nx)) and true or false
+    elseif reg == 2 then
+        local g, t = self.regLeaderGap, self.regTarget
+        if not (g and t) then return false end
+        return g < t * 0.93                       -- still bunched behind the leader
+    end
+    return false
 end
 
 function DRIVER:BeginReverse(now)
@@ -681,6 +784,10 @@ function DRIVER:Think(now)
     if self.state == "DWELL" or self.state == "REVERSE_HOLD" then
         self:ApplyDrive(0, AI.HOLD_BRAKE)
         if now >= (self.holdUntil or 0) then
+            if self.state == "DWELL" and self:RegulationHold(now) then
+                self:SetStatus("REGULATING " .. (IsValid(self.servedPlatform) and (self.servedPlatform.StationIndex or "") or ""))
+                return                                 -- keep doors open, hold for regulation
+            end
             if self.state == "DWELL" then self:CloseDoors() end
             self.state = "DRIVE"
             self.stuckTime, self.hasMoved = 0, false   -- grace period after a stop
@@ -692,6 +799,7 @@ function DRIVER:Think(now)
     local pos = tp and tp[1]
     local dir = Metrostroi.TrainDirections and Metrostroi.TrainDirections[head]
     self:UpdateARS(pos, dir, now)                      -- refresh the governing ARS signal
+    self:UpdateRoutePos(pos)                           -- track position along the route (for ahead-checks)
 
     -- Build the target speed from every limit. The ARS code IS the AUTHORISED max
     -- wherever the track sends one; cruise is ONLY the fallback for un-coded track
@@ -711,14 +819,39 @@ function DRIVER:Think(now)
                  train = trainLim, term = termLim, target = target }
     self:TryOpenSignal(now, speed)             -- request a route if held at a red route signal
 
+    local status = "DRIVE"
+    local pf = self:NextPlatform()
+    local platAim = pf and (self:ForwardDist(self:PlatformStopPoint(pf)) / AI.U_PER_M - PLATFORM_STOP_OFFSET)
+
+    -- HARD STOP for a red signal / train ahead, using the same precise distance
+    -- braking so a stop is actually held at instead of rolled through. Only takes
+    -- PRIORITY over the platform when the obstacle is genuinely BEFORE it - a red
+    -- AT the platform exit must let us berth (doors) first, then hold the departure.
+    local obstacleM = math.min(self.sigStopM or math.huge, self.trainStopM or math.huge)
+    if obstacleM < math.huge and (not platAim or obstacleM < platAim - 5) then
+        if obstacleM <= 0.6 then
+            self:ApplyDrive(0, speed > ARRIVE_SPEED and 6 or AI.HOLD_BRAKE)
+            self:SetStatus(self.holdSignal and "HELD AT SIGNAL" or "HELD (train ahead)")
+            return
+        end
+        local vms  = speed / 3.6
+        local need = (vms * vms) / (2 * obstacleM)
+        if need >= math.max(0.2, AI.CVars.station_decel:GetFloat()) then
+            -- 40% margin + full service authority: always pull up short of the
+            -- stop, never overrun it (safety beats comfort at a red).
+            self:ApplyDrive(0, math.Clamp(need * BRAKE_PER_MS2 * 1.4, 1.0, 6))
+            self:SetStatus(self.holdSignal and "STOPPING (signal)" or "STOPPING (train)")
+            return
+        end
+        target = math.min(target, self:StopSpeed(obstacleM))
+    end
+
     -- Platform stop - DISTANCE-BASED braking. Each tick we work out the
     -- deceleration needed to bring the nose to rest on the aim point (a couple of
     -- metres short of the far end) and command exactly that brake. Re-solving it
     -- live makes it self-correcting: the train settles onto a smooth braking curve
     -- and stops on the mark, with no speed-error lag riding over it, no last-moment
     -- slam, and no overrun (the old proportional law caused all three).
-    local status = "DRIVE"
-    local pf = self:NextPlatform()
     if pf then
         local farFd = self:ForwardDist(self:PlatformStopPoint(pf)) / AI.U_PER_M  -- m, nose -> far end
         local aim   = farFd - PLATFORM_STOP_OFFSET                               -- m, nose -> stop point

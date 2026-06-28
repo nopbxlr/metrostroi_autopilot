@@ -474,9 +474,60 @@ function AI.CmdTeleport(ply, args)
     tell(ply, "boarded AI train #" .. n .. " (forward cab).")
 end
 
+-- Why isn't regulation working? Shows the route chains, how many trains landed on
+-- each, and the aimed train's leader gap / spacing target.
+function AI.CmdRegDebug(ply)
+    local function line(s)
+        if IsValid(ply) then ply:PrintMessage(HUD_PRINTCONSOLE, "[AI REG] " .. s .. "\n") end
+        tell(ply, s)
+    end
+    line("regulation=" .. AI.CVars.regulation:GetInt() .. "  maxhold=" .. AI.CVars.reg_maxhold:GetInt())
+    local chains = AI.EnsureRoute and AI.EnsureRoute()
+    line("route chains: " .. (chains and tostring(#chains) or "NIL (route build failed)"))
+    if AI.EnsureLines then AI.EnsureLines() end
+    if AI.ConsistReps then
+        local perLine, total = {}, 0
+        for _, rep in ipairs(AI.ConsistReps()) do
+            total = total + 1
+            local tp = Metrostroi.TrainPositions and Metrostroi.TrainPositions[rep.w]
+            local p = tp and tp[1]
+            if p and p.path then
+                local ci, cd = AI.ChainPos(math.floor(tonumber(p.path.id) or 0), p.x or 0)
+                if ci then
+                    local rs = AI.RegState and AI.RegState[rep.w]
+                    local root = AI.TrainLinePos(ci, cd, rs and rs.vsign or 1)
+                    if root then perLine[root] = (perLine[root] or 0) + 1 end
+                end
+            end
+        end
+        line("consists (trains): " .. total)
+        local shown = 0
+        for root, n in pairs(perLine) do
+            shown = shown + 1
+            if shown <= 8 then line(string.format("  line %s: %d train(s)", tostring(root), n)) end
+        end
+    end
+    local drv = resolveDriver(ply)
+    if drv then
+        local head = IsValid(drv.head) and drv.head or drv.lead
+        local tp = IsValid(head) and Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
+        local p = tp and tp[1]
+        local ci, cd
+        if p and p.path then ci, cd = AI.ChainPos(math.floor(tonumber(p.path.id) or 0), p.x or 0) end
+        local rs = IsValid(head) and AI.RegState and AI.RegState[head]
+        local root, lp = ci and AI.TrainLinePos(ci, cd, rs and rs.vsign or 1)
+        line(string.format("aimed: state=%s chain=%s line=%s linePos=%s | leaderGap=%s target=%s",
+            tostring(drv.state), tostring(ci), tostring(root),
+            lp and string.format("%.3f", lp) or "?",
+            drv.regLeaderGap and string.format("%.3f", drv.regLeaderGap) or "nil",
+            drv.regTarget and string.format("%.3f", drv.regTarget) or "nil"))
+    end
+end
+
 --------------------------------------------------------------------------------
 -- Register console commands
 --------------------------------------------------------------------------------
+concommand.Add("metrostroi_ai_regdebug", function(ply) AI.CmdRegDebug(ply) end)
 concommand.Add("metrostroi_ai_status", function(ply) AI.CmdStatus(ply) end)
 concommand.Add("metrostroi_ai_tp",     function(ply, _, a) AI.CmdTeleport(ply, a) end)
 concommand.Add("metrostroi_ai_termdebug", function(ply) AI.CmdTermDebug(ply) end)
@@ -506,6 +557,7 @@ hook.Add("PlayerSay", "MetrostroiAI.Chat", function(ply, text)
     elseif sub == "ars" then AI.CmdArsDebug(ply)
     elseif sub == "doors" or sub == "door" then AI.CmdDoorDebug(ply)
     elseif sub == "term" or sub == "terminus" then AI.CmdTermDebug(ply)
+    elseif sub == "reg" or sub == "regulation" then AI.CmdRegDebug(ply)
     elseif sub == "status" or sub == "where" then AI.CmdStatus(ply)
     elseif sub == "tp" or sub == "goto" or sub == "board" then AI.CmdTeleport(ply, { parts[3] })
     elseif sub == "map" then if IsValid(ply) then net.Start("MetrostroiAI_OpenMap") net.Send(ply) end
@@ -616,74 +668,8 @@ net.Receive("MetrostroiAI_Trains", function(_, ply)
     net.Send(ply)
 end)
 
--- Stitch the raw path segments into continuous ROUTES by following connectivity:
--- two path endpoints that sit on the same spot (3D, so stacked loops don't merge)
--- are joined, and at a junction we keep the straightest continuation so crossovers
--- branch off as their own short chains instead of breaking the running line.
-local function buildChains()
-    local P = {}
-    for id, path in pairs(Metrostroi.Paths or {}) do
-        if istable(path) and #path >= 2 and tonumber(path.length) then
-            local a, b = path[1], path[#path]
-            if isvector(a.pos) and isvector(b.pos) and isvector(path[2].pos) and isvector(path[#path - 1].pos) then
-                P[#P + 1] = {
-                    id  = math.Clamp(math.floor(tonumber(path.id) or tonumber(id) or 0), 0, 65535),
-                    len = path.length, pa = a.pos, pb = b.pos,
-                    oa  = (a.pos - path[2].pos):GetNormalized(),          -- outward tangent at A
-                    ob  = (b.pos - path[#path - 1].pos):GetNormalized(),  -- outward tangent at B
-                    used = false,
-                }
-            end
-        end
-    end
-    local function bestCont(pos, outDir)
-        local best, bestScore, bestEnd
-        for _, q in ipairs(P) do
-            if not q.used then
-                for _, e in ipairs({ { q.pa, q.oa, "a" }, { q.pb, q.ob, "b" } }) do
-                    if pos:DistToSqr(e[1]) < 40 * 40 then
-                        local score = -outDir:Dot(e[2])                  -- 1 = straight through
-                        if score > 0.25 and (not bestScore or score > bestScore) then
-                            best, bestScore, bestEnd = q, score, e[3]
-                        end
-                    end
-                end
-            end
-        end
-        return best, bestEnd
-    end
-    table.sort(P, function(a, b) return a.len > b.len end)
-    local chains = {}
-    for _, seed in ipairs(P) do
-        if not seed.used then
-            seed.used = true
-            local segs = { { path = seed, flip = false } }
-            local cp, co = seed.pb, seed.ob                              -- extend forward
-            while true do
-                local q, qe = bestCont(cp, co)
-                if not q then break end
-                q.used = true
-                if qe == "a" then segs[#segs + 1] = { path = q, flip = false }; cp, co = q.pb, q.ob
-                else              segs[#segs + 1] = { path = q, flip = true  }; cp, co = q.pa, q.oa end
-            end
-            cp, co = seed.pa, seed.oa                                    -- extend backward
-            while true do
-                local q, qe = bestCont(cp, co)
-                if not q then break end
-                q.used = true
-                if qe == "b" then table.insert(segs, 1, { path = q, flip = false }); cp, co = q.pa, q.oa
-                else              table.insert(segs, 1, { path = q, flip = true  }); cp, co = q.pb, q.ob end
-            end
-            local off = 0
-            for _, s in ipairs(segs) do s.offset = off; off = off + s.path.len end
-            chains[#chains + 1] = segs
-        end
-    end
-    return chains
-end
-
 net.Receive("MetrostroiAI_Schematic", function(_, ply)
-    local chains = buildChains()
+    local chains = AI.EnsureRoute() or {}   -- shared route stitching (sv_regulation.lua)
     local stations = {}
     for _, pf in ipairs(ents.FindByClass("gmod_track_platform")) do
         if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
@@ -698,10 +684,10 @@ net.Receive("MetrostroiAI_Schematic", function(_, ply)
     end
     net.Start("MetrostroiAI_Schematic")
     net.WriteUInt(#chains, 16)
-    for _, segs in ipairs(chains) do
-        net.WriteUInt(#segs, 16)
-        for _, s in ipairs(segs) do
-            net.WriteUInt(s.path.id, 16) net.WriteFloat(s.offset) net.WriteFloat(s.path.len) net.WriteBool(s.flip)
+    for _, chain in ipairs(chains) do
+        net.WriteUInt(#chain.segs, 16)
+        for _, s in ipairs(chain.segs) do
+            net.WriteUInt(s.id, 16) net.WriteFloat(s.offset) net.WriteFloat(s.len) net.WriteBool(s.flip)
         end
     end
     net.WriteUInt(#stations, 16)
