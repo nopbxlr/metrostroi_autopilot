@@ -191,6 +191,44 @@ function AI.CmdTermDebug(ply)
     line(string.format("servedPlatform=%s  doorsOpen=%s",
         IsValid(drv.servedPlatform) and tostring(drv.servedPlatform.StationIndex or "?") or "-",
         tostring(drv.doorsOpen)))
+    -- TERMINUS FACE MAP: the ground truth for return-track identification. For each platform
+    -- face near us: its station, PALastStation flag, the PATH it sits on, and the runtime
+    -- CHAIN that path resolves to (same lookup ReturnTrackChain uses) - plus OUR own path /
+    -- chain / travel dir. This is what reveals WHY return-chain detection lands where it does
+    -- (e.g. a shared bidirectional throat that reads as one chain at the platform and only
+    -- splits into the two running tracks further out).
+    do
+        local tpH = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
+        local pH  = tpH and tpH[1]
+        if pH and pH.path and AI.ChainPos then
+            line(string.format("  WE are on path=%s chain=%s x=%.0f",
+                tostring(pH.path.id),
+                tostring(AI.ChainPos(math.floor(tonumber(pH.path.id) or 0), pH.x or 0)), pH.x or 0))
+        end
+        local faces = {}
+        for _, op in ipairs(drv.platforms or {}) do
+            if IsValid(op) and isvector(op.PlatformStart) and isvector(op.PlatformEnd) then
+                local c   = (op.PlatformStart + op.PlatformEnd) * 0.5
+                local fwd = drv:ForwardDist(c) / AI.U_PER_M
+                if math.abs(fwd) < 700 then
+                    local pa = drv:PAInfoFor(op)
+                    local pid, ci = "?", "?"
+                    local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, op:GetAngles())
+                    if ok and res and res[1] and res[1].path then
+                        pid = res[1].path.id
+                        if AI.ChainPos then ci = AI.ChainPos(math.floor(tonumber(pid) or 0), res[1].x or 0) end
+                    end
+                    faces[#faces + 1] = string.format(
+                        "  face station=%s PALast=%s path=%s chain=%s fwd=%+.0fm lat=%.0fu  %s",
+                        tostring(op.StationIndex or "?"), tostring(pa and pa.isLast),
+                        tostring(pid), tostring(ci), fwd, drv:LateralDist(c), tostring(pa and pa.name or ""))
+                end
+            end
+        end
+        table.sort(faces)
+        for i = 1, math.min(#faces, 8) do line(faces[i]) end
+        if #faces == 0 then line("  (no platform faces within 700 m)") end
+    end
     -- ARS frequency: if we've seen a code and then lost it, that's a stop (and,
     -- at the end of coded track, a turn-back) - this is what catches a dead-end
     -- stub the geometric terminus probe misses.
