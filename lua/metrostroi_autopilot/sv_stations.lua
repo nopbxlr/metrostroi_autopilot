@@ -355,6 +355,7 @@ function DRIVER:OpenTurnbackRoute()
     local head = self:GetHead()
     if not IsValid(head) then return false end
     local ref = head:GetPos()
+    local dir = isvector(self.travelDir) and self.travelDir or head:GetForward()
     local returnCi = self:ReturnTrackChain()
     -- switches we think the crossover physically uses (geometric pick), for tie-break
     local want = {}
@@ -411,19 +412,31 @@ function DRIVER:OpenTurnbackRoute()
         if IsValid(sig) and istable(sig.Routes) and sig:GetPos():Distance(ref) < maxFd then
             for k, v in pairs(sig.Routes) do
                 if istable(v) and isstring(v.Switches) and v.Switches:find("%-") then
-                    local overlap = 0
+                    -- The crossover must be AHEAD of us - the points we're about to
+                    -- drive through - so we never grab the PREVIOUS station's crossover
+                    -- behind us that also happens to reach the (line-long) return track.
+                    local maxfd, overlap = nil, 0
                     for _, e in ipairs(string.Explode(",", v.Switches)) do
-                        if e ~= "" and e:sub(-1) == "-" and want[e:sub(1, -2):upper()] then overlap = overlap + 1 end
+                        if e ~= "" then
+                            if e:sub(-1) == "-" and want[e:sub(1, -2):upper()] then overlap = overlap + 1 end
+                            local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(e:sub(1, -2))
+                            if IsValid(s) then
+                                local fd = (s:GetPos() - ref):Dot(dir)
+                                if not maxfd or fd > maxfd then maxfd = fd end
+                            end
+                        end
                     end
-                    local h    = hopsToReturn(v.NextSignal)
-                    local dci  = chainOf(v.NextSignal)
-                    local line = dci and AI.Route and AI.Route.chainStations
-                                 and AI.Route.chainStations[dci] and #AI.Route.chainStations[dci] > 0 or false
-                    local score = (h ~= nil and (1000 - h * 10) or 0) + (line and 30 or 0) + overlap
-                    if score > 0 and (not bestScore or score > bestScore) then
-                        best, bestK, bestScore, bestName = sig, k, score, v.RouteName
-                        bestTag = (h ~= nil) and string.format("-> RETURN in %d hop(s)", h)
-                                  or (line and "-> line (not return track)" or "geometric")
+                    if maxfd and maxfd > -AI.HALF_CAR then   -- its points extend ahead of us
+                        local h    = hopsToReturn(v.NextSignal)
+                        local dci  = chainOf(v.NextSignal)
+                        local line = dci and AI.Route and AI.Route.chainStations
+                                     and AI.Route.chainStations[dci] and #AI.Route.chainStations[dci] > 0 or false
+                        local score = (h ~= nil and (1000 - h * 10) or 0) + (line and 30 or 0) + overlap
+                        if score > 0 and (not bestScore or score > bestScore) then
+                            best, bestK, bestScore, bestName = sig, k, score, v.RouteName
+                            bestTag = (h ~= nil) and string.format("-> RETURN in %d hop(s)", h)
+                                      or (line and "-> line (not return track)" or "geometric")
+                        end
                     end
                 end
             end
