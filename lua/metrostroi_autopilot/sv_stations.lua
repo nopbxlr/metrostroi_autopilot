@@ -475,27 +475,33 @@ function DRIVER:OpenTurnbackRoute()
                         -- hops / nearest crossover. No switch-overlap (it fed back on its
                         -- own pick); these are all geometric and stable.
                         local onOurChain = ourChain and chainOf(sig.Name) == ourChain or false
-                        -- This is just the route written on the signal we're approaching:
-                        -- on OUR track, diverting OUR rail, nearest ahead - exactly what
-                        -- "!sopen <that route>" does by hand. Whether it FORWARD-reaches
-                        -- the return track is only a tiny nudge, because the real move
-                        -- threads the scissors/sidings first (AK2-4 doesn't forward-reach
-                        -- it, yet it's the correct route), so that test must NOT dominate.
-                        -- governs OUR track (1e7); diverts OUR rail (1e6) at the NEAREST
-                        -- point so we take the scissors entry we reach FIRST (- divertFd);
-                        -- reaches the return track (1e5, dominating distance so a near route
-                        -- into a depot can't beat a real return route).
+                        -- governs OUR track (1e7) so its points divert US, not a parallel
+                        -- movement - this is the real guard against picking a route that
+                        -- leaves us running straight; THEN reaches the RETURN track (1e6):
+                        -- the whole point of the move, so a stub that merely diverts our
+                        -- rail into a dead pull-track (SV2005 'SV5-') can NEVER beat the
+                        -- route that crosses to the return line (SV1R1). From our own chain
+                        -- you can't reach the return chain without crossing over, so an
+                        -- on-our-track route that reaches it inherently grabs our rail -
+                        -- even when the geometric divertFd window happens to miss the point.
+                        -- Then diverts our rail (1e5) at the nearest entry - this is what
+                        -- carries a SAWTOOTH terminus (AK2-4) that has no through-route to
+                        -- the return track in one move; then any line track (1e4). Tie-
+                        -- breaks (<1e4): fewer route-hops, then nearer crossover.
                         local score = (onOurChain and 1e7 or 0)
-                                      + (divertFd and 1e6 or 0)
-                                      + (h ~= nil and 1e5 or 0)
-                                      - (divertFd or 0)
+                                      + (h ~= nil and 1e6 or 0)
+                                      + (divertFd and 1e5 or 0)
+                                      + (line and 1e4 or 0)
+                                      - (h or 0) * 50
+                                      - (divertFd or 0) / AI.U_PER_M
                         if (onOurChain or divertFd or h ~= nil or line)
                            and (not bestScore or score > bestScore) then
                             best, bestK, bestScore, bestName = sig, k, score, v.RouteName
                             bestTag = string.format("%s%s",
                                 onOurChain and "OUR-track " or "OTHER-track ",
-                                divertFd and string.format("diverts our rail @%dm", math.Round(divertFd / AI.U_PER_M))
-                                or (h ~= nil and string.format("-> RETURN %dhop", h) or "-> line"))
+                                h ~= nil and string.format("-> RETURN %dhop", h)
+                                or (divertFd and string.format("diverts our rail @%dm", math.Round(divertFd / AI.U_PER_M))
+                                or "-> line"))
                         end
                     end
                 end
