@@ -223,20 +223,21 @@ function DRIVER:BeginReverse(now)
     self.holdUntil = now + 5
     self.arsReverseCooldown = true   -- suppress ARS-loss braking until we re-acquire a code
     self:ApplyDrive(0, AI.HOLD_BRAKE)
-    -- Throw the crossover so we depart on the OPPOSITE (correct) track. If we can't
-    -- find one we just reverse on the same track - the safe fallback for stubs /
-    -- single-track / loops with no crossover.
-    self.turnbackSwitches = self:FindTurnbackSwitches()
-    if self.turnbackSwitches and #self.turnbackSwitches > 0 then
-        local ids = {}
-        for _, sw in ipairs(self.turnbackSwitches) do
-            pcall(sw.SendSignal, sw, "alt", nil, true)   -- route=true: force, like the interlocking does
-            ids[#ids + 1] = sw:GetNW2String("ID", "?")
-        end
-        self:OpenTurnbackRoute()                          -- line + HOLD them the mapper's way
+    -- Line the turn-back crossover so we depart on the OPPOSITE (correct) track. The
+    -- mapper's interlocked route is the SOLE switch authority: OpenRoute sets EVERY switch
+    -- the chosen route lists - "+" to main, "-" to alt - and holds it. We deliberately do
+    -- NOT add a geometric raw throw on top of it any more. That raw throw flipped switches
+    -- the route does NOT list (e.g. AK3/AK6, for route 'AK3-2' = AK2-,AK4-,AK5-) to alt,
+    -- and OpenRoute - which only touches switches it lists - then left them there, breaking
+    -- the very path we'd just lined and derailing us. With no raw throw those switches stay
+    -- at their default (main), which is exactly what the route needs. (On a non-interlocked
+    -- map with no route at all, we simply reverse on the same track - the safe fallback.)
+    self.turnbackSwitches = nil
+    self:FindTurnbackSwitches()                          -- diagnostic only: fills turnbackPick, throws nothing
+    if self:OpenTurnbackRoute() then
         self.nextRouteReopen = now + 1.5
         if AI.CVars.debug:GetInt() == 1 then
-            AI.Msg("turnback: ", table.concat(ids, "+"), "  route: ", tostring(self.turnbackRoute))
+            AI.Msg("turnback route: ", tostring(self.turnbackRoute))
         end
     end
     self:SetStatus("TERMINUS")
