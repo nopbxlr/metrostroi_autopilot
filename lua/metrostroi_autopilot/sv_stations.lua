@@ -13,9 +13,43 @@ local TURNBACK_SCAN_M, TURNBACK_NEAR_U, TURNBACK_FAR_U, TURNBACK_DIAG_M =
 --------------------------------------------------------------------------------
 -- Platforms
 --------------------------------------------------------------------------------
+-- Build a station -> authored stop point(s) map from the map's PA station markers
+-- (gmod_track_pa_marker, PAType 1). Each marks where the FRONT of the train should
+-- berth: rail x = marker.TrackPosition.x - PAStationCorrection (Metrostroi's own
+-- formula, sv source). It also carries the terminus flag (PALastStation) and door
+-- side. Only present on maps that ship PA data; we fall back to the platform end.
+function AI.BuildPAStops()
+    local map, gp = {}, Metrostroi.GetTrackPosition
+    for _, m in ipairs(ents.FindByClass("gmod_track_pa_marker")) do
+        if IsValid(m) and m.PAType == 1 and m.PAStationID and istable(m.TrackPosition) and m.TrackPosition.x then
+            local tp    = m.TrackPosition
+            local path  = tp.node1 and tp.node1.path
+            local stopX = tp.x - (tonumber(m.PAStationCorrection) or 0)
+            local wpos
+            if path and gp then local ok, p = pcall(gp, path, stopX); if ok and isvector(p) then wpos = p end end
+            local sid = tonumber(m.PAStationID)
+            map[sid] = map[sid] or {}
+            table.insert(map[sid], {
+                pos        = wpos or m:GetPos(),
+                isLast     = m.PALastStation and true or false,
+                rightDoors = m.PAStationRightDoors,
+                name       = m.PAStationName,
+            })
+        end
+    end
+    AI.PAStops = map
+    return map
+end
+
+function AI.EnsurePAStops()
+    if not AI.PAStops then AI.BuildPAStops() end
+    return AI.PAStops
+end
+
 function DRIVER:ScanPlatforms()
     self.platforms = ents.FindByClass("gmod_track_platform")
     self.signals   = ents.FindByClass("gmod_track_signal")
+    if not AI.PAStops or not next(AI.PAStops) then AI.BuildPAStops() end  -- (re)build until markers exist
 end
 
 -- Find the next platform beside our track, ahead of us. Selection is keyed on
@@ -47,11 +81,35 @@ function DRIVER:NextPlatform()
     return best
 end
 
--- The stop point is the platform end furthest along our travel direction,
--- so the whole train ends up berthed within the platform.
+-- The aim point the nose should reach. PREFER the map's authored PA station stop
+-- marker (the real front-of-train berth) when one matches this station and sits
+-- sensibly within the platform; otherwise EXACTLY as before - the platform end
+-- furthest along travel, so the whole train berths within the platform.
 function DRIVER:PlatformStopPoint(pf)
+    local stop = self:PAStopFor(pf)
+    if stop then return stop end
     local a, b = pf.PlatformStart, pf.PlatformEnd
     return (self:ForwardDist(a) > self:ForwardDist(b)) and a or b
+end
+
+-- The authored PA stop point for this platform's station, or nil. Sanity-gated to
+-- a marker sitting within the platform (+ ~11 m margin) so a mis-tagged marker on
+-- another track can never strand the train short of / past its platform.
+function DRIVER:PAStopFor(pf)
+    if not (IsValid(pf) and pf.StationIndex and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd)) then return nil end
+    local map  = AI.EnsurePAStops and AI.EnsurePAStops()
+    local list = map and map[pf.StationIndex]
+    if not list then return nil end
+    local center = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+    local maxOff = pf.PlatformStart:Distance(pf.PlatformEnd) * 0.5 + 600   -- within platform + ~11 m (units)
+    local best, bestD
+    for _, s in ipairs(list) do
+        if isvector(s.pos) then
+            local d = s.pos:Distance(center)
+            if d < maxOff and (not bestD or d < bestD) then best, bestD = s, d end
+        end
+    end
+    return best and best.pos or nil
 end
 
 function DRIVER:BeginStationStop(now, pf)

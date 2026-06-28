@@ -179,8 +179,9 @@ function AI.CmdTermDebug(ply)
     if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
         local farFd  = drv:ForwardDist(drv:PlatformStopPoint(pf)) / AI.U_PER_M
         local center = (pf.PlatformStart + pf.PlatformEnd) * 0.5
-        line(string.format("nextPlatform: station %s  farFd=%+.0fm  lateral=%.0fu",
-            tostring(pf.StationIndex or "?"), farFd, drv:LateralDist(center)))
+        line(string.format("nextPlatform: station %s  farFd=%+.0fm  lateral=%.0fu  stop=%s",
+            tostring(pf.StationIndex or "?"), farFd, drv:LateralDist(center),
+            drv:PAStopFor(pf) and "PA marker" or "platform end"))
     else
         line("nextPlatform: none")
     end
