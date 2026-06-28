@@ -74,33 +74,51 @@ end
 -- (the wagon's own GetPos sits above the rail - scanning from it read as instantly
 -- off-track, the old "ENDS 0m" bug).
 function DRIVER:RailScanAhead(maxScan)
-    if not (Metrostroi.GetPositionOnTrack and Metrostroi.GetTrackPosition and isvector(self.travelDir)) then
+    if not (Metrostroi.GetTrackPosition and Metrostroi.GetPositionOnTrack and isvector(self.travelDir)) then
         return false
     end
     local head = self:GetHead()
     local tp   = IsValid(head) and Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
     local pos  = tp and tp[1]
     if not (pos and pos.path and pos.x) then return false end
-    local cpos, cdir = Metrostroi.GetTrackPosition(pos.path, pos.x)
-    if not (isvector(cpos) and isvector(cdir)) then return false end
+    local _, cdir = Metrostroi.GetTrackPosition(pos.path, pos.x)
+    if not isvector(cdir) then return false end
     local sgn = (self.travelDir:Dot(cdir) < 0) and -1 or 1
-    local rp  = Metrostroi.GetTrackPosition(pos.path, pos.x + sgn * (AI.HALF_CAR / AI.U_PER_M))
-    if not isvector(rp) then rp = cpos end
-    local dir = Vector(cdir); dir:Normalize(); dir = dir * sgn
-    local prev, gone, step = rp, 0, 8                         -- 8 m probe steps
-    while gone < maxScan do
-        local probe = prev + dir * (step * AI.U_PER_M)
-        local ok, res = pcall(Metrostroi.GetPositionOnTrack, probe, dir:Angle())
-        local r = ok and res and res[1]
-        if not (r and isvector(r.pos) and (r.distance or 1e9) < 250) then
-            return true, gone                                 -- rail ends here
+    -- Walk PATH BY PATH along the exact rail. Each path's end is known precisely
+    -- from its node x, so this follows the curve exactly - unlike stepping a straight
+    -- tangent, which false-reads "rail ends" on the sharp curves in a switch throat
+    -- (that was reversing the train short of the crossover). We only reproject at a
+    -- real path end, to cross onto the connected next segment (so a buffer on a short
+    -- stub past the current path is still caught).
+    local path, x = pos.path, pos.x
+    local gone = -(AI.HALF_CAR / AI.U_PER_M)                  -- measure from the nose
+    for _ = 1, 40 do
+        local first, last = path[1], path[#path]
+        if not (first and last and first.x and last.x) then return true, math.max(0, gone) end
+        local endX   = (sgn > 0) and last.x or first.x
+        local remain = math.max(0, (endX - x) * sgn)
+        if gone + remain >= maxScan then return true, nil end   -- rail keeps going past the scan
+        gone = gone + remain
+        local endNode = (sgn > 0) and last or first
+        if not (isvector(endNode.pos) and isvector(endNode.dir)) then return true, math.max(0, gone) end
+        local dir = endNode.dir * sgn
+        local np, nx, nsgn
+        for _, dd in ipairs({ 4, 9, 16 }) do                  -- probe just past the end for a connection
+            local p = endNode.pos + dir * (dd * AI.U_PER_M)
+            local ok, res = pcall(Metrostroi.GetPositionOnTrack, p, dir:Angle())
+            local r = ok and res and res[1]
+            if r and r.path and (r.distance or 1e9) < 120
+               and math.floor(tonumber(r.path.id) or -1) ~= math.floor(tonumber(path.id) or -2) then
+                np, nx = r.path, r.x
+                local _, nd = Metrostroi.GetTrackPosition(r.path, r.x)
+                nsgn = (isvector(nd) and nd:Dot(dir) < 0) and -1 or 1
+                break
+            end
         end
-        local nd = r.pos - prev
-        if nd:Length() > 1 then nd:Normalize(); if nd:Dot(dir) > 0 then dir = nd end end  -- steer along the rail
-        prev = r.pos
-        gone = gone + step
+        if not np then return true, math.max(0, gone) end       -- nothing connects -> rail ends here
+        path, x, sgn = np, nx, nsgn
     end
-    return true, nil                                          -- ran, rail continues past the scan
+    return true, nil                                            -- ran the hop cap -> assume continues
 end
 
 -- Physical last resort for when the network position is degenerate at a stub end
