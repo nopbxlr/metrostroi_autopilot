@@ -343,9 +343,13 @@ function DRIVER:TurnbackThink(now, dt, speed)
         self.tb = nil; self:SetStatus("TURNBACK done"); return
     end
 
-    -- Fully across the points -> reverse. A direct plan leaves us on the return track
-    -- (REVERSE then finishes); a tail plan reverses on the tail and re-plans leg 2.
-    if self:LegSwitchesCleared(leg) then
+    -- LEG1 fully across the points -> reverse. Leg 1 lands us on the pull track (or, at a
+    -- plain scissors, on the return track facing the buffer); either way we reverse, then
+    -- either finish (REVERSE sees OnReturnTrack) or run leg 2. We do NOT reverse after
+    -- LEG2: that is the come-back leg, so once across it we are already heading the right
+    -- way and just crawl on until we reach the return track (the LEG2-complete check above)
+    -- - reversing there would send us straight back toward the pull track.
+    if tb.phase == "LEG1" and self:LegSwitchesCleared(leg) then
         self:FlipDirection(now)
         tb.phase, tb.holdUntil = "REVERSE", now + 5
         self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TURNBACK reverse"); return
