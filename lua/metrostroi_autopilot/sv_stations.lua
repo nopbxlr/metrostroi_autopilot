@@ -361,6 +361,22 @@ function DRIVER:OpenTurnbackRoute()
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
     end
+    -- Switches on OUR rail just ahead (small lateral offset): the points the train
+    -- would actually divert AT. A return route must throw one of THESE to carry us
+    -- across the scissors - throwing only the adjacent rail's switch reaches the
+    -- return track too but leaves us running straight. Geometric (lateral), so it's
+    -- stable and can't feed back on the previous pick the way switch-overlap did.
+    local ourRail = {}
+    for _, sw in ipairs(ents.FindByClass("gmod_track_switch")) do
+        if IsValid(sw) then
+            local rel = sw:GetPos() - ref
+            local fd  = rel:Dot(dir)
+            local lat = (rel - dir * fd):Length()
+            if fd > -AI.HALF_CAR and fd < 120 * AI.U_PER_M and lat < 450 then
+                ourRail[(sw:GetNW2String("ID", "") or ""):upper()] = true
+            end
+        end
+    end
     -- The chain a signal sits on (by name).
     local function chainOf(nm)
         local sg = byName[nm or ""]
@@ -408,9 +424,10 @@ function DRIVER:OpenTurnbackRoute()
                     -- so we never grab a crossover we've already driven past - e.g. the
                     -- previous station's, which reaches the line-long return track too)
                     -- and nearest switch (the crossover we'd hit FIRST, the tie-break).
-                    local maxfd, nearAbs
+                    local maxfd, nearAbs, ourDivert = nil, nil, 0
                     for _, e in ipairs(string.Explode(",", v.Switches)) do
                         if e ~= "" then
+                            if e:sub(-1) == "-" and ourRail[e:sub(1, -2):upper()] then ourDivert = ourDivert + 1 end
                             local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(e:sub(1, -2))
                             if IsValid(s) then
                                 local fd = (s:GetPos() - ref):Dot(dir)
@@ -424,11 +441,12 @@ function DRIVER:OpenTurnbackRoute()
                         local dci  = chainOf(v.NextSignal)
                         local line = dci and AI.Route and AI.Route.chainStations
                                      and AI.Route.chainStations[dci] and #AI.Route.chainStations[dci] > 0 or false
-                        -- reaches the return track -> fewest hops, then the NEAREST
-                        -- crossover ahead (so we take the throat points in front of us,
-                        -- not a farther route on the same return track). No switch-
-                        -- overlap term, which fed back on itself and locked one pick in.
-                        local score = (h ~= nil) and (1e6 - h * 3e4 - (nearAbs or 0))
+                        -- reaches the return track -> prefer one that diverts OUR rail
+                        -- (carries us across), then fewest hops, then the nearest
+                        -- crossover ahead. No switch-overlap term (it fed back on its own
+                        -- previous pick); ourDivert is geometric, so it's stable.
+                        local score = (h ~= nil)
+                                      and (1e6 + ourDivert * 1e4 - h * 3e3 - (nearAbs or 0))
                                       or (line and 1 or 0)
                         if score > 0 and (not bestScore or score > bestScore) then
                             best, bestK, bestScore, bestName = sig, k, score, v.RouteName
