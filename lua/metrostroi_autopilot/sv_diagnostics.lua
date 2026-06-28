@@ -222,6 +222,15 @@ function AI.CmdTermDebug(ply)
     -- (a LINE track = a proper track-change back onto the line; off-line = toward a
     -- depot / yard). This is how we tell the turn-back route from the depot trap.
     line("--- nearby diverting routes (LINE = back onto the line, off-line = depot/yard) ---")
+    local rc = drv.ReturnTrackChain and drv:ReturnTrackChain()
+    local oc
+    do
+        local tp2 = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
+        local p2  = tp2 and tp2[1]
+        if p2 and p2.path and AI.ChainPos then oc = AI.ChainPos(math.floor(tonumber(p2.path.id) or 0), p2.x or 0) end
+    end
+    line(string.format("  return-track chain=%s  our chain=%s  (<<RETURN = route lands on the return track)",
+        tostring(rc), tostring(oc)))
     local byName = {}
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
@@ -242,9 +251,14 @@ function AI.CmdTermDebug(ply)
                         end
                         dDepot = string.format("  next@%dm", math.floor(nsig:GetPos():Distance(ref) / AI.U_PER_M))
                     end
+                    local dci
+                    if IsValid(nsig) and istable(nsig.TrackPosition) and nsig.TrackPosition.path and AI.ChainPos then
+                        dci = AI.ChainPos(math.floor(tonumber(nsig.TrackPosition.path.id) or 0), nsig.TrackPosition.x or 0)
+                    end
+                    local mark = (dci and rc and dci == rc) and "  <<RETURN" or ""
                     shown = shown + 1
-                    line(string.format("  %s '%s'  sw=%s  -> %s [%s]%s",
-                        tostring(sg.Name), tostring(r.RouteName or ""), sw, nx, cls, dDepot))
+                    line(string.format("  %s '%s'  sw=%s  -> %s [%s] ch=%s%s%s",
+                        tostring(sg.Name), tostring(r.RouteName or ""), sw, nx, cls, tostring(dci), dDepot, mark))
                 end
             end
         end

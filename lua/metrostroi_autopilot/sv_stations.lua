@@ -306,10 +306,43 @@ end
 -- system (which is why the crossover never diverted us, even though we were
 -- "throwing" it). Returns false (and the raw SendSignal fallback still runs) on
 -- maps whose switches aren't route-controlled.
+-- The route chain of the RETURN track at the terminus we're at - the opposite
+-- running track we continue on after turning back. Prefer the value recorded when
+-- we dwelled (returnChainCi); else derive it geometrically so it works even when a
+-- train is engaged already in the throat: the nearest station's OTHER platform
+-- face is the return track (we're laterally on our own arrival track, so the other
+-- face is the one we did NOT arrive on).
+function DRIVER:ReturnTrackChain()
+    if self.returnChainCi then return self.returnChainCi end
+    if not (AI.ChainPos and Metrostroi.GetPositionOnTrack) then return nil end
+    local head = self:GetHead(); if not IsValid(head) then return nil end
+    local hp = head:GetPos()
+    local mine, md
+    for _, pf in ipairs(self.platforms or {}) do
+        if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
+            local d = ((pf.PlatformStart + pf.PlatformEnd) * 0.5):Distance(hp)
+            if not md or d < md then mine, md = pf, d end
+        end
+    end
+    if not mine then return nil end
+    for _, pf in ipairs(self.platforms or {}) do
+        if IsValid(pf) and pf ~= mine and pf.StationIndex == mine.StationIndex
+           and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
+            local c = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+            local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, pf:GetAngles())
+            if ok and res and res[1] and res[1].path then
+                return (AI.ChainPos(math.floor(tonumber(res[1].path.id) or 0), res[1].x or 0))
+            end
+        end
+    end
+    return nil
+end
+
 function DRIVER:OpenTurnbackRoute()
     local head = self:GetHead()
     if not IsValid(head) then return false end
     local ref = head:GetPos()
+    local returnCi = self:ReturnTrackChain()
     -- switches we think the crossover physically uses (geometric pick), for tie-break
     local want = {}
     for _, sw in ipairs(self.turnbackSwitches or {}) do
@@ -345,7 +378,7 @@ function DRIVER:OpenTurnbackRoute()
                         if e ~= "" and e:sub(-1) == "-" and want[e:sub(1, -2):upper()] then overlap = overlap + 1 end
                     end
                     local dci      = destChain(v.NextSignal)
-                    local onReturn = dci and self.returnChainCi and dci == self.returnChainCi or false
+                    local onReturn = dci and returnCi and dci == returnCi or false
                     local line     = dci and AI.IsLinePath
                                      and (byName[v.NextSignal] and istable(byName[v.NextSignal].TrackPosition)
                                           and byName[v.NextSignal].TrackPosition.path
