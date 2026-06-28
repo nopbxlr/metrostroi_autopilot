@@ -322,6 +322,7 @@ function DRIVER:TurnbackThink(now, dt, speed)
         self:SetStatus("TURNBACK reverse")
         if now >= (tb.holdUntil or 0) then
             if self:OnReturnTrack() then
+                self:CloseLeg(tb.leg)                           -- straighten the crossover so we run OUT on the return track, not get diverted back across it
                 self.tb = nil                                   -- direct crossover: done
             else
                 local leg = self:PlanTurnback()                 -- re-plan the come-back leg
@@ -340,6 +341,7 @@ function DRIVER:TurnbackThink(now, dt, speed)
 
     -- LEG2 complete: back on the return line and clear of the points.
     if tb.phase == "LEG2" and self:OnReturnTrack() and self:LegSwitchesCleared(leg) then
+        self:CloseLeg(leg)                                       -- straighten the throat behind us
         self.tb = nil; self:SetStatus("TURNBACK done"); return
     end
 
