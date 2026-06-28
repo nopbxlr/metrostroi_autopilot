@@ -340,6 +340,19 @@ function DRIVER:Think(now)
     local pf = self:NextPlatform()
     local platAim = pf and (self:ForwardDist(self:PlatformStopPoint(pf)) / AI.U_PER_M - PLATFORM_STOP_OFFSET)
 
+    -- Approaching a terminus with nothing to serve: line the turn-back crossover
+    -- EARLY, while we're still well short of the points - so they're clear of the
+    -- train and can actually throw, and we divert across the scissors instead of
+    -- arriving on top of switches that then refuse. Fires as soon as a buffer is in
+    -- range (coded track or throat); OnReturnTrack stops it once we've crossed over.
+    if AI.CVars.terminus_rev:GetInt() == 1 and not pf and not self.arsReverseCooldown
+       and not self:RecentlyReversedNear(now) and now >= (self.nextApproachRoute or 0) then
+        if self:TrackEndAhead(240) and not self:OnReturnTrack() then
+            self.nextApproachRoute = now + 1.0
+            self:OpenTurnbackRoute()
+        end
+    end
+
     -- HARD STOP for a red signal / train ahead, using the same precise distance
     -- braking so a stop is actually held at instead of rolled through. Only takes
     -- PRIORITY over the platform when the obstacle is genuinely BEFORE it - a red
@@ -375,17 +388,6 @@ function DRIVER:Think(now)
     if self:ARSLost(now) and not pf and not self.arsReverseCooldown then
         local endM = self:TrackEndAhead(200)
         if endM then
-            -- Line the crossover NOW, on the way IN, so the train takes the scissors /
-            -- pull-track route toward the RETURN track as it enters the throat, rather
-            -- than running straight past the points (set to main) into the wrong dead
-            -- end. The route that lands back on the line throws a near-rail switch we
-            -- sit on, so opening it diverts us across to the return track. Re-run
-            -- periodically as the train threads the throat.
-            if AI.CVars.terminus_rev:GetInt() == 1 and now >= (self.nextApproachRoute or 0)
-               and not self:OnReturnTrack() then
-                self.nextApproachRoute = now + 1.0
-                self:OpenTurnbackRoute()
-            end
             local aim = endM - TERMINUS_BUFFER
             if speed <= ARRIVE_SPEED and aim <= 1.2 then
                 if AI.CVars.terminus_rev:GetInt() == 1 and not self:RecentlyReversedNear(now) then
