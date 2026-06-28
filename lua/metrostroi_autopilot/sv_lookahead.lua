@@ -26,11 +26,35 @@ function DRIVER:UpdateARS(pos, dir, now)
     if AI.CVars.obey_signals:GetInt() == 0 then return end
     if not (pos and pos.node1 and type(dir) == "boolean" and Metrostroi.GetARSJoint) then return end
     local ok, fwd = pcall(Metrostroi.GetARSJoint, pos.node1, pos.x, dir, self.head)
-    if not (ok and IsValid(fwd)) then return end
-    self.arsSignal = fwd
-    self.arsCode   = fwd.ARSSpeedLimit
-    self.arsNext   = fwd.ARSNextSpeedLimit
-    self.arsSpeed  = self:DecodeARS(fwd)
+    if ok and IsValid(fwd) then
+        self.arsSignal = fwd
+        self.arsCode   = fwd.ARSSpeedLimit
+        self.arsNext   = fwd.ARSNextSpeedLimit
+        self.arsSpeed  = self:DecodeARS(fwd)
+    end
+    -- ARS frequency tracking. On a coded line, losing the code (no governing
+    -- signal at all, or one that sends no code) is a loss of frequency: the cab
+    -- ARS would brake to a stop, NOT coast at cruise into whatever is ahead - and
+    -- the un-coded dead-end stub past a terminus is exactly that. We only ARM
+    -- this once we've genuinely seen a code, so a fully un-coded map (no ARS
+    -- network) still uses the cruise fallback and drives normally. Re-acquiring a
+    -- code clears the loss (and the post-reverse suppression set by BeginReverse).
+    if type(self.arsSpeed) == "number" then
+        self.arsEverSeen        = true
+        self.arsLostAt          = nil
+        self.arsReverseCooldown = nil
+    elseif self.arsEverSeen and not self.arsLostAt then
+        self.arsLostAt = now
+    end
+end
+
+-- True when we're on a coded line but the ARS code has dropped out for long
+-- enough to be a real loss of frequency (debounced past the brief gaps at block
+-- joints / switches). Loss of frequency = no movement authority: the train must
+-- stop, exactly like a stop signal.
+function DRIVER:ARSLost(now)
+    if AI.CVars.obey_signals:GetInt() == 0 then return false end
+    return (self.arsEverSeen and self.arsLostAt and (now - self.arsLostAt) > 1.0) and true or false
 end
 
 -- Decode a governing signal to the km/h the cab ARS would show, exactly like the

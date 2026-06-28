@@ -174,6 +174,13 @@ function AI.CmdTermDebug(ply)
     line(string.format("servedPlatform=%s  doorsOpen=%s",
         IsValid(drv.servedPlatform) and tostring(drv.servedPlatform.StationIndex or "?") or "-",
         tostring(drv.doorsOpen)))
+    -- ARS frequency: if we've seen a code and then lost it, that's a stop (and,
+    -- at the end of coded track, a turn-back) - this is what catches a dead-end
+    -- stub the geometric terminus probe misses.
+    line(string.format("ARS: code=%s everSeen=%s lostFor=%s -> LOST=%s  revCooldown=%s",
+        tostring(drv.arsSpeed), tostring(drv.arsEverSeen or false),
+        drv.arsLostAt and string.format("%.1fs", CurTime() - drv.arsLostAt) or "-",
+        tostring(drv:ARSLost(CurTime())), tostring(drv.arsReverseCooldown or false)))
     -- Scan BOTH ways along travel: +fwd = toward the buffer ahead, -fwd = behind us
     -- toward the line (where an approach-side crossover lives).
     local ref = head:GetPos()

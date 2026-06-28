@@ -346,6 +346,31 @@ function DRIVER:Think(now)
         target = math.min(target, self:StopSpeed(obstacleM))
     end
 
+    -- LOSS OF ARS FREQUENCY: we were on coded track and the code has dropped out,
+    -- with nothing to serve ahead (the un-coded dead-end stub past a terminus).
+    -- Treat it like a stop signal - brake firmly to a halt rather than coast at
+    -- cruise into a wall - then, if reversing is enabled, change ends and turn the
+    -- train back through the crossover behind us. The cooldown (cleared the moment
+    -- we re-acquire a code) lets the reversed train drive back off the stub instead
+    -- of instantly braking/re-reversing while it's still on un-coded track.
+    if self:ARSLost(now) and not pf and not self.arsReverseCooldown then
+        if speed > ARRIVE_SPEED then
+            self:ApplyDrive(0, 5)                       -- firm brake: no authority ahead
+            self:SetStatus("ARS LOST - braking")
+            return
+        end
+        self.arsHoldStart = self.arsHoldStart or now
+        if AI.CVars.terminus_rev:GetInt() == 1 and (now - self.arsHoldStart) > 2 then
+            self.arsHoldStart = nil
+            self:BeginReverse(now)                      -- end of coded track: turn back
+            return
+        end
+        self:ApplyDrive(0, AI.HOLD_BRAKE)
+        self:SetStatus("ARS LOST - held (end of line)")
+        return
+    end
+    self.arsHoldStart = nil
+
     -- Platform stop - DISTANCE-BASED braking. Each tick we work out the
     -- deceleration needed to bring the nose to rest on the aim point (a couple of
     -- metres short of the far end) and command exactly that brake. Re-solving it

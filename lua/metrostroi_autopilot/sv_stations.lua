@@ -106,6 +106,7 @@ function DRIVER:BeginReverse(now)
     self.power = 0
     self.state = "REVERSE_HOLD"
     self.holdUntil = now + 5
+    self.arsReverseCooldown = true   -- suppress ARS-loss braking until we re-acquire a code
     self:ApplyDrive(0, AI.HOLD_BRAKE)
     -- Throw the crossover so we depart on the OPPOSITE (correct) track. If we can't
     -- find one we just reverse on the same track - the safe fallback for stubs /
