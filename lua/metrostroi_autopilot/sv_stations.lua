@@ -216,6 +216,7 @@ function DRIVER:BeginReverse(now)
     self:NoteReverse(now)            -- remember this spot so we can't oscillate back to it
     self.turnbackRouteRef = nil      -- new phase/direction: re-evaluate the turn-back route
     self.turnbackCrossed, self.turnbackAllSwitches = nil, nil
+    self.turnbackStubFrom = nil      -- forget how far we probed the last tail/depot lead
     self.travelDir = -self.travelDir
     self.servedPlatform = nil
     self.power = 0
@@ -356,8 +357,15 @@ end
 function DRIVER:OpenTurnbackRoute()
     local head = self:GetHead()
     if not IsValid(head) then return false end
-    -- Crossed onto the return track? The maneuver is done; drop the route lock.
-    if self:OnReturnTrack() then self.turnbackRouteRef, self.turnbackCrossed, self.turnbackAllSwitches = nil, nil, nil; return false end
+    -- Crossed onto the return track AND the whole train is past the scissors? The
+    -- maneuver is done; drop the route lock. Wait for turnbackCrossed (not just the
+    -- nose reaching the return chain) - dropping it while the tail still threads the
+    -- throat re-arms the end-of-track detector mid-crossover, whose S-curve false-fires
+    -- and brakes us to a stand on the points, bouncing us back the way we came.
+    if self:OnReturnTrack() and self.turnbackCrossed then
+        self.turnbackRouteRef, self.turnbackCrossed, self.turnbackAllSwitches = nil, nil, nil
+        return false
+    end
     -- LOCKED: once we've committed to a turn-back route, keep re-opening that SAME
     -- route (holding its points) - do NOT re-select. Choosing a different route once
     -- the train is mid-scissors swings switches under it and derails it (we picked
@@ -383,22 +391,6 @@ function DRIVER:OpenTurnbackRoute()
     local byName = {}
     for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
         if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
-    end
-    -- Switches on OUR rail just ahead (small lateral offset): the points the train
-    -- would actually divert AT. A return route must throw one of THESE to carry us
-    -- across the scissors - throwing only the adjacent rail's switch reaches the
-    -- return track too but leaves us running straight. Geometric (lateral), so it's
-    -- stable and can't feed back on the previous pick the way switch-overlap did.
-    local ourRail = {}
-    for _, sw in ipairs(ents.FindByClass("gmod_track_switch")) do
-        if IsValid(sw) then
-            local rel = sw:GetPos() - ref
-            local fd  = rel:Dot(dir)
-            local lat = (rel - dir * fd):Length()
-            if fd > -AI.HALF_CAR and fd < 120 * AI.U_PER_M and lat < TURNBACK_NEAR_U then
-                ourRail[(sw:GetNW2String("ID", "") or ""):upper()] = true   -- on OUR rail, not the far one
-            end
-        end
     end
     -- The chain a signal sits on (by name).
     local function chainOf(nm)
@@ -453,11 +445,18 @@ function DRIVER:OpenTurnbackRoute()
                             local nm = e:sub(1, -2)
                             local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(nm)
                             if IsValid(s) then
-                                local fd = (s:GetPos() - ref):Dot(dir)
+                                local rel = s:GetPos() - ref
+                                local fd  = rel:Dot(dir)
+                                local lat = (rel - dir * fd):Length()
                                 if not maxfd or fd > maxfd then maxfd = fd end
-                                -- nearest point ON OUR RAIL it throws to alt = the scissors
-                                -- entry it would actually divert US at
-                                if e:sub(-1) == "-" and ourRail[nm:upper()] then
+                                -- nearest '-' point AHEAD and on OUR rail (small lateral
+                                -- offset) = the scissors entry it would actually divert US
+                                -- at. Measured straight off the switch (not via a 120 m-
+                                -- windowed set) so it's still valid at the early commit
+                                -- distance (~240 m out, where that window was empty) - that
+                                -- emptiness let a far return route tie and lock instead of
+                                -- the crossover right in front of us.
+                                if e:sub(-1) == "-" and fd > -AI.HALF_CAR and lat < TURNBACK_NEAR_U then
                                     local a = math.abs(fd)
                                     if not divertFd or a < divertFd then divertFd = a end
                                 end
@@ -553,6 +552,16 @@ function DRIVER:MaintainTurnback()
             if IsValid(sw) and (sw:GetPos():Dot(self.travelDir) - tailAlong) >= -AI.HALF_CAR * 2 then clear = false; break end
         end
         if clear then self.turnbackCrossed = true end
+    end
+
+    -- Fully across AND on the return track => the maneuver is complete: drop the lock
+    -- (and the crawl-speed cap that rides on it) so we accelerate away on the return
+    -- line. Done here, every tick, because once the points are behind us nothing else
+    -- calls OpenTurnbackRoute to clear it (the approach block skips while OnReturnTrack;
+    -- the re-assert below has released the switches). A sawtooth tail/depot lead is NOT
+    -- the return track, so this leaves its lock set for the stub turn-back to use.
+    if self.turnbackCrossed and self.turnbackRouteRef and self:OnReturnTrack() then
+        self.turnbackRouteRef, self.turnbackCrossed, self.turnbackAllSwitches = nil, nil, nil
     end
 
     -- Re-assert each thrown (alt) switch until the train's tail is past it, so its
