@@ -146,7 +146,7 @@ function AI.CmdTermDebug(ply)
     local tp  = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
     local pos = tp and tp[1]
     local term = pos and drv:TerminusDistance(pos)
-    line("=== !ai term  [build=facemap2] ===")   -- if you don't see this tag, the server is running OLD lua
+    line("=== !ai term  [build=facemap3] ===")   -- if you don't see this tag, the server is running OLD lua
     line(string.format("state=%s  term=%s  turnback phase=%s",
         tostring(drv.state),
         term and (string.format("%.0f m to buffer", term)) or "none (track continues / loop)",
@@ -229,6 +229,31 @@ function AI.CmdTermDebug(ply)
         table.sort(faces)
         for i = 1, math.min(#faces, 8) do line(faces[i]) end
         if #faces == 0 then line("  (no platform faces within 700 m)") end
+    end
+    -- STOP-POINT GEOMETRY: for the platform we're berthing at (served, and/or the next one),
+    -- the two ends + centre + matched PA marker, each as fwd/lat from the head, plus the
+    -- chosen stop point. Reveals WHY we berth where we do - e.g. a PA marker pinned to the
+    -- near end or matched to the wrong face, so we stop at the platform entrance.
+    do
+        local want = {}
+        if IsValid(drv.servedPlatform) then want[drv.servedPlatform] = "served" end
+        local nx = drv:NextPlatform(); if IsValid(nx) and not want[nx] then want[nx] = "next" end
+        for pf, tag in pairs(want) do
+            if isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
+                local function f(v) return drv:ForwardDist(v) / AI.U_PER_M end
+                local stop = drv:PlatformStopPoint(pf)
+                local pa   = drv:PAStopFor(pf)
+                line(string.format("STOP %s station=%s len=%.0fm  start fwd%+.0f/lat%.0f  end fwd%+.0f/lat%.0f  ctr fwd%+.0f/lat%.0f",
+                    tag, tostring(pf.StationIndex or "?"),
+                    pf.PlatformStart:Distance(pf.PlatformEnd) / AI.U_PER_M,
+                    f(pf.PlatformStart), drv:LateralDist(pf.PlatformStart),
+                    f(pf.PlatformEnd),   drv:LateralDist(pf.PlatformEnd),
+                    f((pf.PlatformStart + pf.PlatformEnd) * 0.5), drv:LateralDist((pf.PlatformStart + pf.PlatformEnd) * 0.5)))
+                line(string.format("     PAmarker=%s  -> stopPoint fwd%+.0fm",
+                    pa and string.format("fwd%+.0f/lat%.0f", f(pa), drv:LateralDist(pa)) or "none (uses far platform end)",
+                    f(stop)))
+            end
+        end
     end
     -- ARS frequency: if we've seen a code and then lost it, that's a stop (and,
     -- at the end of coded track, a turn-back) - this is what catches a dead-end
