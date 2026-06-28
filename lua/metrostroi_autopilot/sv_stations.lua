@@ -34,6 +34,8 @@ function AI.BuildPAStops()
                 isLast     = m.PALastStation and true or false,
                 rightDoors = (m.PAStationRightDoors == true) or (tonumber(m.PAStationRightDoors) == 1),
                 name       = m.PAStationName,
+                dlStart    = tonumber(m.PADeadlockStart),   -- tail / pull-track extent past the
+                dlEnd      = tonumber(m.PADeadlockEnd),     -- stop (a turn-back siding, not depot)
             })
         end
     end
@@ -124,6 +126,10 @@ function DRIVER:BeginStationStop(now, pf)
     self.servedPlatform = pf
     local info = self:PAInfoFor(pf)
     self.servedIsTerminus = info and info.isLast or false   -- map flags this as the last station
+    -- A deadlock (tail / pull track past the platform) means the crossover is UP
+    -- the throat, not at the platform - so we must NOT reverse here; run on into the
+    -- tail and turn back there instead.
+    self.servedDeadlock = info and (info.dlStart ~= nil or info.dlEnd ~= nil) or false
     self:ApplyDrive(0, AI.HOLD_BRAKE)
     if AI.CVars.open_doors:GetInt() == 1 then self:OpenDoors(pf) end
     hook.Run("MetrostroiAI.StationStop", self, pf)

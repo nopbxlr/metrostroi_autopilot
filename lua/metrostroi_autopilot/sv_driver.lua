@@ -290,10 +290,12 @@ function DRIVER:Think(now)
             end
             if self.state == "DWELL" then
                 self:CloseDoors()
-                -- Terminus station (the map's PA marker flags it): turn back here
-                -- rather than departing forward toward the dead end. The crossover
-                -- route logic lines the points; anti-oscillation guards a re-flip.
-                if self.servedIsTerminus and AI.CVars.terminus_rev:GetInt() == 1
+                -- Terminus station (the map's PA marker flags it) with the crossover
+                -- AT the platform (no tail track): turn back right here. If there's a
+                -- deadlock tail track, the crossover is up the throat - so we DON'T
+                -- reverse here; we run on into the tail and turn back there instead.
+                if self.servedIsTerminus and not self.servedDeadlock
+                   and AI.CVars.terminus_rev:GetInt() == 1
                    and not self:RecentlyReversedNear(now) then
                     self.servedIsTerminus = nil
                     self:BeginReverse(now)

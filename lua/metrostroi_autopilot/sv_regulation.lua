@@ -92,6 +92,17 @@ function AI.ChainPos(pid, x)
     return lk.ci, lk.offset + (lk.flip and (lk.len - x) or x)
 end
 
+-- Is this path part of the running LINE (its chain serves stations)? Depot / yard
+-- tracks aren't - they have no platforms - so this tells a "leads back to the
+-- line" route from one that runs off into the depot.
+function AI.IsLinePath(pid)
+    AI.EnsureRoute(); AI.EnsureLines()
+    local lk = AI.Route.lookup and AI.Route.lookup[pid]
+    if not lk then return false end
+    local sts = AI.Route.chainStations and AI.Route.chainStations[lk.ci]
+    return (sts and #sts > 0) and true or false
+end
+
 --------------------------------------------------------------------------------
 -- Headway regulation (level 2). Every ~1.5 s: place all trains on their chains,
 -- order them, and tell each AI driver the gap to the train ahead and the even-

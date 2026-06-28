@@ -217,6 +217,39 @@ function AI.CmdTermDebug(ply)
         end
     end
     if n == 0 then line("  no switches within ~450 m either direction (single-track / stub terminus?)") end
+
+    -- Terminus routing: the diverting routes on nearby signals and where each leads
+    -- (a LINE track = a proper track-change back onto the line; off-line = toward a
+    -- depot / yard). This is how we tell the turn-back route from the depot trap.
+    line("--- nearby diverting routes (LINE = back onto the line, off-line = depot/yard) ---")
+    local byName = {}
+    for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
+        if IsValid(sg) and sg.Name then byName[sg.Name] = sg end
+    end
+    local shown = 0
+    for _, sg in ipairs(ents.FindByClass("gmod_track_signal")) do
+        if IsValid(sg) and istable(sg.Routes) and sg:GetPos():Distance(ref) < 3500 then
+            for _, r in ipairs(sg.Routes) do
+                local sw = r.Switches
+                if isstring(sw) and sw:find("%-") and shown < 16 then
+                    local nx  = r.NextSignal or ""
+                    local cls, dDepot = "?", ""
+                    local nsig = byName[nx]
+                    if IsValid(nsig) then
+                        local tp = nsig.TrackPosition
+                        if istable(tp) and tp.path and AI.IsLinePath then
+                            cls = AI.IsLinePath(math.floor(tonumber(tp.path.id) or 0)) and "LINE" or "off-line"
+                        end
+                        dDepot = string.format("  next@%dm", math.floor(nsig:GetPos():Distance(ref) / AI.U_PER_M))
+                    end
+                    shown = shown + 1
+                    line(string.format("  %s '%s'  sw=%s  -> %s [%s]%s",
+                        tostring(sg.Name), tostring(r.RouteName or ""), sw, nx, cls, dDepot))
+                end
+            end
+        end
+    end
+    if shown == 0 then line("  (no diverting routes within ~67 m)") end
 end
 
 -- Why isn't regulation working? Shows the route chains, how many trains landed on
