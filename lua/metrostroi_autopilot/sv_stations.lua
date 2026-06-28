@@ -215,7 +215,7 @@ end
 function DRIVER:BeginReverse(now)
     self:NoteReverse(now)            -- remember this spot so we can't oscillate back to it
     self.turnbackRouteRef = nil      -- new phase/direction: re-evaluate the turn-back route
-    self.turnbackCrossed = nil
+    self.turnbackCrossed, self.turnbackAllSwitches = nil, nil
     self.travelDir = -self.travelDir
     self.servedPlatform = nil
     self.power = 0
@@ -357,7 +357,7 @@ function DRIVER:OpenTurnbackRoute()
     local head = self:GetHead()
     if not IsValid(head) then return false end
     -- Crossed onto the return track? The maneuver is done; drop the route lock.
-    if self:OnReturnTrack() then self.turnbackRouteRef, self.turnbackCrossed = nil, nil; return false end
+    if self:OnReturnTrack() then self.turnbackRouteRef, self.turnbackCrossed, self.turnbackAllSwitches = nil, nil, nil; return false end
     -- LOCKED: once we've committed to a turn-back route, keep re-opening that SAME
     -- route (holding its points) - do NOT re-select. Choosing a different route once
     -- the train is mid-scissors swings switches under it and derails it (we picked
@@ -499,14 +499,18 @@ function DRIVER:OpenTurnbackRoute()
     -- Adopt ONLY the route's alt ("-") switches so MaintainTurnback re-asserts the
     -- right set; the "+" (main) switches are handled by re-opening the route, and
     -- forcing them to alt would break the path.
-    local list = {}
+    local list, allsw = {}, {}
     for _, e in ipairs(string.Explode(",", best.Routes[bestK].Switches)) do
-        if e ~= "" and e:sub(-1) == "-" then
+        if e ~= "" then
             local s = Metrostroi.GetSwitchByName and Metrostroi.GetSwitchByName(e:sub(1, -2))
-            if IsValid(s) then list[#list + 1] = s end
+            if IsValid(s) then
+                allsw[#allsw + 1] = s                                  -- ALL points (for "crossed")
+                if e:sub(-1) == "-" then list[#list + 1] = s end       -- alt points (to re-assert)
+            end
         end
     end
     if #list > 0 then self.turnbackSwitches = list end
+    self.turnbackAllSwitches = #allsw > 0 and allsw or nil
     self.turnbackRoute = string.format("%s #%s '%s' [%s]",
         tostring(best.Name), tostring(bestK), tostring(bestName or "?"), tostring(bestTag))
     return true
@@ -517,15 +521,29 @@ end
 -- we re-assert every tick (which also resets their revert timer) and re-open the
 -- mapper's route periodically so the interlocking keeps the points for us.
 function DRIVER:MaintainTurnback()
-    local list = self.turnbackSwitches
-    if not (list and #list > 0) then self.turnbackSwitches = nil return end
-    -- Re-assert each thrown switch until the whole train (tail included) is past
-    -- it, so its rails can't snap back under us mid-crossing (the switch's own
-    -- occupancy-inhibit also guards this). Release the set once all are behind us.
+    if not (istable(self.wagons) and isvector(self.travelDir)) then return end
     local tailAlong = math.huge
     for _, w in ipairs(self.wagons) do
         if IsValid(w) then tailAlong = math.min(tailAlong, w:GetPos():Dot(self.travelDir)) end
     end
+    if tailAlong == math.huge then return end
+
+    -- "Crossed" = the whole train is clear of EVERY point the route throws (not just
+    -- the entry switch), with a car-length of margin - so we don't reverse while still
+    -- standing on the scissors. Run this BEFORE the early-out below, since the alt set
+    -- is released earlier than the train is fully past all the points.
+    if self.turnbackRouteRef and istable(self.turnbackAllSwitches) and not self.turnbackCrossed then
+        local clear = true
+        for _, sw in ipairs(self.turnbackAllSwitches) do
+            if IsValid(sw) and (sw:GetPos():Dot(self.travelDir) - tailAlong) >= -AI.HALF_CAR * 2 then clear = false; break end
+        end
+        if clear then self.turnbackCrossed = true end
+    end
+
+    -- Re-assert each thrown (alt) switch until the train's tail is past it, so its
+    -- rails can't snap back under us mid-crossing. Release the set once all are behind.
+    local list = self.turnbackSwitches
+    if not (list and #list > 0) then self.turnbackSwitches = nil return end
     local anyAhead = false
     for _, sw in ipairs(list) do
         if IsValid(sw) and (sw:GetPos():Dot(self.travelDir) - tailAlong) >= -AI.HALF_CAR then
@@ -541,7 +559,6 @@ function DRIVER:MaintainTurnback()
         end
     else
         self.turnbackSwitches = nil   -- keep turnbackRoute so !ai term still shows what we lined
-        if self.turnbackRouteRef then self.turnbackCrossed = true end   -- whole train is past the points
     end
 end
 
