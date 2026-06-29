@@ -570,6 +570,24 @@ function DRIVER:TurnbackThink(now, dt, speed)
         end
     end
 
+    -- LEG2: a platform can sit right past the throat. LEG2 otherwise only ends on switch-clear,
+    -- which is a couple of car-lengths PAST the last switch - well past a close-in platform, so
+    -- the nose blows through the stop point and never berths. So brake for the next platform's
+    -- stop point during LEG2, and once we're berthed there (crossover already behind us) end the
+    -- leg and hand to the normal station dwell.
+    if tb.phase == "LEG2" then
+        local pf = self:NextPlatform()
+        if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd) then
+            local aim = self:ForwardDist(self:PlatformStopPoint(pf)) / U_PER_M   -- m, nose -> stop point
+            if speed <= 5 and aim <= 1.5 then                                    -- berthed on the mark
+                if self:LegSwitchesCleared(leg) then self:CloseLeg(leg) end      -- straighten only if our tail is clear
+                self.tb = nil
+                self:BeginStationStop(now, pf); return
+            end
+            crawl = math.min(crawl, self:StopSpeed(math.max(0, aim)))            -- ease down to the platform
+        end
+    end
+
     -- CRAWL: LEG1 forward to clear the points (it reverses above once across), LEG2 forward
     -- to the return line (the LEG2-complete check finishes us when OnReturnTrack). We do NOT
     -- consult the end-of-track probe here: it false-fires on the sharp S-curve through a
