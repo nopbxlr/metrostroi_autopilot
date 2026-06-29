@@ -43,7 +43,7 @@ AI.CVars = {
     obey_signals    = CreateConVar("metrostroi_ai_obey_signals",   "1", FCVAR_ARCHIVE, "1 = stop at red signals / occupied blocks"),
     open_routes     = CreateConVar("metrostroi_ai_open_routes",     "1", FCVAR_ARCHIVE, "When held at a red ROUTE signal (e.g. a terminus departure), request its route like a dispatcher. The interlocking still won't clear it into an occupied block, so it's collision-safe."),
     avoid_trains    = CreateConVar("metrostroi_ai_avoid_trains",   "1", FCVAR_ARCHIVE, "1 = brake for trains ahead even without signalling"),
-    regulation      = CreateConVar("metrostroi_ai_regulation",     "0", FCVAR_ARCHIVE, "Auto traffic regulation: 0 = off; 1 = hold at a station (doors open) until the NEXT station is clear of any train; 2 = adapt dwell so every train on the map (AI + manual) ends up equally spaced (equal headway)."),
+    regulation      = CreateConVar("metrostroi_ai_regulation",     "2", FCVAR_ARCHIVE, "Auto traffic regulation: 0 = off; 1 = hold at a station (doors open) until the NEXT station is clear of any train; 2 = adapt dwell so every train on the map (AI + manual) ends up equally spaced (equal headway). Default 2 (equal headway)."),
     reg_maxhold     = CreateConVar("metrostroi_ai_reg_maxhold",  "150", FCVAR_ARCHIVE, "Cap (seconds) on how long an AI train will hold at a platform for regulation, so it can never get stuck."),
     rate            = CreateConVar("metrostroi_ai_rate",          "15", FCVAR_ARCHIVE, "Control loop frequency in Hz"),
     debug           = CreateConVar("metrostroi_ai_debug",          "0", FCVAR_ARCHIVE, "Show on-screen debug info for AI trains"),
