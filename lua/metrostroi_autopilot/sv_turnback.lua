@@ -55,6 +55,23 @@ end
 --------------------------------------------------------------------------------
 -- PLANNING
 --------------------------------------------------------------------------------
+-- Would committing this route throw a switch we'd TRAIL through (ahead of us, on our own
+-- road) to its diverging leg? That pulls the rail out from under the approaching train and
+-- splits it (the NJ5 throat). Only switches AHEAD count - one already behind us is moot.
+-- We must instead run PAST such a throat onto the stub, reverse, and cross when it's facing.
+function DRIVER:LegThrowsTrailing(switchesStr)
+    if not (isstring(switchesStr) and Metrostroi.GetSwitchByName) then return false end
+    for _, e in ipairs(string.Explode(",", switchesStr)) do
+        if e ~= "" and e:sub(-1) == "-" then                     -- a switch this route throws to ALT
+            local s = Metrostroi.GetSwitchByName(e:sub(1, -2))
+            if IsValid(s) and self:ForwardDist(s:GetPos()) > -HALF_CAR and (self:SwitchTrailing(s)) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 -- Find the turn-back crossover that takes us toward the RETURN track. Returns a leg
 -- { sig, k, name, switches, landCh, divertFd } or nil, and fills self.tbPlanStr for
 -- the !ai term diagnostic. We require the route to divert OUR rail at a switch AHEAD
@@ -227,12 +244,22 @@ function DRIVER:PlanTurnback()
     -- move, which picks the diagonal that actually works; an unnamed twin (RCAK7) often
     -- crosses on the other diagonal and derails. Then fewest hops, then nearest entry.
     local best, bestScore
+    local deferTrailing = false   -- a return-reaching crossover exists but throws a trailing throat
     for _, c in ipairs(cands) do
         if c.divertFd <= THROAT_M * U_PER_M then
             local direct  = reachesReturn(ourCh, c.switches)        -- by (entry chain, switch SET)
             local real    = c.landCh ~= nil and c.landCh ~= ourCh
             local viaTail = (not direct) and real and tailReachesReturn(c.landCh) or false
             local kind    = direct and 3 or (viaTail and 2 or (real and 1 or 0))
+            -- TRAILING THROAT: this route would throw a switch ahead that we trail through,
+            -- splitting us under ourselves (NJ5). We cannot cross it now; if it DOES reach the
+            -- return it's the cross we'll make AFTER running out onto the stub and reversing
+            -- (then the throat is facing). Remember that and skip this candidate as a usable leg.
+            if self:LegThrowsTrailing(c.switches) then
+                if kind >= 2 then deferTrailing = true end
+                kind = -1   -- never let it win `best`
+            end
+            if kind >= 0 then
             -- "named" = this MOVE (switch set) entered from OUR chain is a route a dispatcher
             -- would !sopen, even if THIS signal's copy is unnamed. So 'AK3-1' (named on ch4)
             -- is preferred over the unnamed RCAK7 #3 twin (its named copy 'AK4-1' lives on
@@ -250,9 +277,16 @@ function DRIVER:PlanTurnback()
                           - (c.divertFd / U_PER_M) * 1e-1
                           + thisNamed * 1e-2
             if not bestScore or score > bestScore then best, bestScore, c.kind, c.hops = c, score, kind, h end
+            end   -- if kind >= 0 (usable, non-trailing)
         end
     end
-    if not best then self.tbPlanStr = "no turn-back crossover on our track ahead"; return nil end
+    if not best then
+        self.tbDeferCross = deferTrailing
+        self.tbPlanStr = deferTrailing
+            and "trailing throat ahead - run onto stub & reverse, then cross out"
+            or  "no turn-back crossover on our track ahead"
+        return nil
+    end
     local kindStr = ({ [3] = "DIRECT", [2] = "via-tail", [1] = "tail", [0] = "stub" })[best.kind or 0]
     self.tbPlanStr = string.format("%s #%s '%s' sw=%s -> %s (%s%s) @%dm",
         tostring(best.sig.Name), tostring(best.k), tostring(best.name or "?"), tostring(best.switches),
@@ -264,9 +298,11 @@ function DRIVER:PlanTurnback()
     -- maneuver: holding for a better position (the scissors entry still ahead) beats
     -- diverting onto a dead pull-track and oscillating on it (the SV2005 trap).
     if (best.kind or 0) < 2 then
+        self.tbDeferCross = deferTrailing
         self.tbPlanStr = self.tbPlanStr .. "  [not committed: no through route]"
         return nil
     end
+    self.tbDeferCross = false
     return best
 end
 
@@ -388,6 +424,16 @@ function DRIVER:StartTurnback(now)
         self:SetStatus("TURNBACK: " .. tostring(self.tbPlanStr))
         return true
     end
+    -- TRAILING THROAT ahead (NJ): the only crossover that reaches the return is one we'd have
+    -- to throw a switch we trail through - it would split us. So don't cross now; run straight
+    -- out past it onto the stub, reverse at the rail end, then the come-back re-plan finds the
+    -- throat FACING and crosses out. (The throat stays on our road meanwhile - we never throw it.)
+    if self.tbDeferCross and not self:RecentlyReversedNear(now) then
+        self.servedIsTerminus = nil
+        self.tb = { phase = "RUNOUT" }
+        self:SetStatus("TURNBACK: run out past trailing throat, reverse, then cross")
+        return true
+    end
     -- No crossover within reach AHEAD, and we just served a terminus. Reverse in place ONLY if
     -- the rail END is right here (within a throat length): then the scissors is BEHIND the
     -- platform (we crossed it on the way IN, the KS case) or it's a plain stub, and the REVERSE
@@ -414,6 +460,27 @@ end
 function DRIVER:TurnbackThink(now, dt, speed)
     local tb    = self.tb
     local crawl = AI.CVars.turnback_speed and AI.CVars.turnback_speed:GetFloat() or 25
+
+    -- RUNOUT: a trailing throat is ahead, so we run straight out onto the stub PAST it (it stays
+    -- on our road - we never throw it), brake to the rail end, then reverse. The REVERSE re-plan
+    -- then sees the throat FACING and crosses out (NJ). No route is opened for this leg.
+    if tb.phase == "RUNOUT" then
+        local endM  = self:TrackEndAhead(THROAT_M) or 999         -- m to the rail end (within a throat)
+        local atEnd = endM <= 2.2 * HALF_CAR / U_PER_M
+        if atEnd and speed < 4 then                               -- stopped at the stub end -> reverse
+            self:FlipDirection(now)
+            tb.phase, tb.holdUntil = "REVERSE", now + 5
+            self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TURNBACK reverse (stub end)"); return
+        end
+        if atEnd then                                             -- close: brake to a stop first
+            self:ApplyDrive(0, AI.SERVICE_BRAKE_MAX)
+            self:SetStatus("TURNBACK runout (stopping at stub end)"); return
+        end
+        local cap = self:StopSpeed(math.max(0, endM - 1.5 * HALF_CAR / U_PER_M))   -- ease down to the buffer
+        self:Drive(math.min(crawl, cap), speed, dt)
+        self:SetStatus(string.format("TURNBACK runout %dm to stub end", math.Round(endM)))
+        return
+    end
 
     -- Hold after a reverse, then either finish (we're on the return track) or run leg 2.
     if tb.phase == "REVERSE" then
