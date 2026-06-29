@@ -388,11 +388,17 @@ function DRIVER:StartTurnback(now)
         self:SetStatus("TURNBACK: " .. tostring(self.tbPlanStr))
         return true
     end
-    -- No crossover AHEAD, but we just served a terminus: the scissors is BEHIND the platform
-    -- (we crossed it on the way IN). Reverse right here at the platform - the REVERSE phase
-    -- then re-plans, now finds the scissors ahead, and crosses it (the KS case). This avoids
-    -- trundling on past the platform into the over-run to reverse there (the "pull-track dance").
-    if self.servedIsTerminus and not self:RecentlyReversedNear(now) then
+    -- No crossover within reach AHEAD, and we just served a terminus. Reverse in place ONLY if
+    -- the rail END is right here (within a throat length): then the scissors is BEHIND the
+    -- platform (we crossed it on the way IN, the KS case) or it's a plain stub, and the REVERSE
+    -- re-plan finds the scissors ahead and crosses it - avoiding the over-run "pull-track dance".
+    -- But if the rail RUNS ON well past us, the scissors is a long way ahead (SV/100: ~470 m out,
+    -- past the platform); do NOT reverse here - return false and keep DRIVING, and PlanTurnback
+    -- picks the scissors up once we're within a throat length of it.
+    local tp  = Metrostroi.TrainPositions and Metrostroi.TrainPositions[self:GetHead()]
+    local pos = tp and tp[1]
+    if self.servedIsTerminus and not self:RecentlyReversedNear(now)
+       and pos and self:TerminusDistance(pos, THROAT_M) then
         self.servedIsTerminus = nil
         self:FlipDirection(now)
         self.tb = { phase = "REVERSE", holdUntil = now + 5 }
