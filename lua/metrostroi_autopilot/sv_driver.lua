@@ -331,26 +331,21 @@ function DRIVER:Think(now)
     local pf = self:NextPlatform()
     local platAim = pf and (self:ForwardDist(self:PlatformStopPoint(pf)) / AI.U_PER_M - PLATFORM_STOP_OFFSET)
 
-    -- TURN-BACK trigger: a terminus ahead with nothing left to serve - either the map's
-    -- PA marker flagged the station we just served as the last one, or the rail simply
-    -- ends ahead. Plan and start the cross -> reverse -> return maneuver; from here the
-    -- engine (self.tb) owns the train. If there is no crossover route at all, StartTurnback
-    -- returns false and the end-of-track block below stops & reverses on the spot.
-    -- Look early (rail end within 300 m) so the crossover's ENTRY switch is still ahead of
-    -- us when we plan - committing late, after we've rolled past the scissors entry, leaves
-    -- only a dead stub reachable. StartTurnback only commits a leg that reaches the return,
-    -- so trying eagerly each tick simply commits as soon as a good plan appears.
-    -- ALWAYS require the rail to actually END ahead (a real buffer within range) - never turn
-    -- back on the PALastStation flag alone. That flag is unreliable here (Imagine Line sets it
-    -- on through stations: 701 and 705 are flagged "last" but the line runs on), so trusting it
-    -- turned us back a station early at a depot-junction crossover. We use the PATH-END
-    -- distance (switch-independent: the buffer is 431 m past 706 but 2.9 km past 705 on the
-    -- same path), not the geometric rail-walk (which can't even reach 706's buffer through the
-    -- throat). The flag only WIDENS how far we look (a real terminus' buffer can sit a few
-    -- hundred metres past the platform), and 705's buffer is far enough out to stay excluded.
+    -- TURN-BACK trigger: a terminus with nothing left to serve. From here the engine (self.tb)
+    -- owns the train; if there's no crossover route at all StartTurnback returns false and the
+    -- end-of-track block below stops & reverses on the spot.
+    -- The KEY guard is PlatformAheadOnPath(): NEVER turn back while an unserved platform is
+    -- still ahead on our path. That single track-based test fixes both failure modes the flag
+    -- and geometry caused: turning back at the KS approach-scissors with platform 700 still
+    -- ahead, and turning back at through-station 705 (Imagine Line spuriously flags 701/705
+    -- "last") with 706 still ahead. NextPlatform's lateral corridor can't be trusted near a
+    -- throat - the fold swings a platform's lateral from ~240u to ~11000u - but its track
+    -- position can. Given nothing is left to serve, ANY terminus indicator commits the plan:
+    -- a flagged last station, the path ending ahead (within range), or the rail simply ending.
     if AI.CVars.terminus_rev:GetInt() == 1 and not pf and not self.arsReverseCooldown
        and not self:RecentlyReversedNear(now) and now >= (self.nextTbTry or 0)
-       and self:TerminusDistance(pos, self.servedIsTerminus and 500 or 400) then
+       and not self:PlatformAheadOnPath()
+       and (self.servedIsTerminus or self:TerminusDistance(pos, 400) or self:TrackEndAhead(300)) then
         self.nextTbTry = now + 0.5
         if self:StartTurnback(now) then return end
     end

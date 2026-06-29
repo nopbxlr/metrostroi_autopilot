@@ -81,6 +81,36 @@ function DRIVER:NextPlatform()
     return best
 end
 
+-- Is there still an UNSERVED platform ahead of us on our own path? Used to hold off the
+-- turn-back until we've actually served the terminus platform - we must not turn back at the
+-- approach scissors while the terminus platform is still ahead (KS 700). This is TRACK-based
+-- (same path id, greater track position in our travel direction), NOT geometric: near a throat
+-- the folded/curved line swings a platform's lateral from ~240u to ~11000u, so a lateral
+-- corridor (NextPlatform) loses sight of it and we'd turn back a station early.
+function DRIVER:PlatformAheadOnPath()
+    if not (Metrostroi.TrainPositions and Metrostroi.GetPositionOnTrack and isvector(self.travelDir)) then return false end
+    local head = self:GetHead(); if not IsValid(head) then return false end
+    local tp = Metrostroi.TrainPositions[head]
+    local p  = tp and tp[1]
+    if not (p and p.path and p.node1 and isvector(p.node1.dir)) then return false end
+    local ourPathId = math.floor(tonumber(p.path.id) or 0)
+    local sgn       = (self.travelDir:Dot(p.node1.dir) < 0) and -1 or 1   -- +x or -x is "ahead"
+    local servedIdx = IsValid(self.servedPlatform) and self.servedPlatform.StationIndex
+    for _, pf in ipairs(self.platforms or {}) do
+        if IsValid(pf) and isvector(pf.PlatformStart) and isvector(pf.PlatformEnd)
+           and pf.StationIndex ~= servedIdx then
+            local c = (pf.PlatformStart + pf.PlatformEnd) * 0.5
+            local ok, res = pcall(Metrostroi.GetPositionOnTrack, c, pf:GetAngles())
+            if ok and res and res[1] and res[1].path
+               and math.floor(tonumber(res[1].path.id) or 0) == ourPathId
+               and ((res[1].x or 0) - (p.x or 0)) * sgn > 5 then       -- a platform still ahead on our path
+                return true
+            end
+        end
+    end
+    return false
+end
+
 -- The aim point the nose should reach. PREFER the map's authored PA station stop
 -- marker (the real front-of-train berth) when one matches this station and sits
 -- sensibly within the platform; otherwise EXACTLY as before - the platform end
