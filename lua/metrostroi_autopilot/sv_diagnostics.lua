@@ -146,7 +146,7 @@ function AI.CmdTermDebug(ply)
     local tp  = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
     local pos = tp and tp[1]
     local term = pos and drv:TerminusDistance(pos)
-    line("=== !ai term  [build=facemap4] ===")   -- if you don't see this tag, the server is running OLD lua
+    line("=== !ai term  [build=facemap5] ===")   -- if you don't see this tag, the server is running OLD lua
     line(string.format("state=%s  term=%s  turnback phase=%s",
         tostring(drv.state),
         term and (string.format("%.0f m to buffer", term)) or "none (track continues / loop)",
@@ -274,10 +274,18 @@ function AI.CmdTermDebug(ply)
             local lat = (rel - dir * fd):Length()
             if math.abs(fd) < 450 * AI.U_PER_M and lat < 1000 then
                 n = n + 1
-                local trailing, dot = drv:SwitchTrailing(sw)
-                line(string.format("  switch %s  fwd=%+.0fm  lat=%.0fu  alt=%s  %s(dot=%s)",
+                -- DEBUG: probe the live switch's track-network structure so we can find the
+                -- right field for facing/trailing. tp=TrackPosition; nb*=branch counts on the
+                -- host node and its neighbours; hdot=travelDir . (angle-based host axis).
+                local tp = sw.TrackPosition
+                local function nbc(nd) return (istable(nd) and istable(nd.branches)) and #nd.branches or "-" end
+                local n1 = istable(tp) and tp.node1
+                local hostDir = (sw:GetAngles() - Angle(0, 90, 0)):Forward()
+                local hdot = isvector(dir) and dir:Dot(hostDir) or 0
+                line(string.format("  switch %s  fwd=%+.0fm  lat=%.0fu  alt=%s  tp=%s n1=%s nbr[n1=%s nx=%s pv=%s] hdot=%.2f",
                     tostring(sw:GetNW2String("ID", "?")), fd / AI.U_PER_M, lat, tostring(sw.AlternateTrack),
-                    trailing and "TRAILING" or "facing", dot and string.format("%.2f", dot) or "?"))
+                    tp and "Y" or "n", n1 and "Y" or "n",
+                    nbc(n1), nbc(istable(n1) and n1.next), nbc(istable(n1) and n1.prev), hdot))
                 if n >= 10 then break end
             end
         end
