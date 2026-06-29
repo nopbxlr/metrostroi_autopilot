@@ -1,5 +1,7 @@
 # Metrostroi Autopilot — AI "fake player" trains
 
+**⬇ [Subscribe on the Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3754449570)**
+
 Drives Metrostroi subway trains around the map by themselves, so your line feels
 alive even when you're the only real player. AI trains:
 
@@ -72,8 +74,12 @@ drop in a new profile that registers the same interface.
 
 ## Installation
 
-A normal addon folder: `garrysmod/addons/metrostroi_autopilot/`. Requires the
-**Metrostroi** addon (and its content). **Restart the map / server after
+Easiest is to **[subscribe on the Steam Workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3754449570)**.
+For a dedicated server, add the item to your server's Workshop collection
+(`+host_workshop_collection` / `workshop.cfg`), or drop it in as a loose addon folder
+at `garrysmod/addons/metrostroi_autopilot/`.
+
+Requires the **Metrostroi** addon (and its content). **Restart the map / server after
 installing or updating** — GMod loads server Lua at startup and won't hot-reload it.
 
 ## Usage
