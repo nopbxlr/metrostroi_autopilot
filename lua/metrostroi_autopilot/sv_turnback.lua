@@ -465,19 +465,17 @@ function DRIVER:TurnbackThink(now, dt, speed)
     -- on our road - we never throw it), brake to the rail end, then reverse. The REVERSE re-plan
     -- then sees the throat FACING and crosses out (NJ). No route is opened for this leg.
     if tb.phase == "RUNOUT" then
-        local endM  = self:TrackEndAhead(THROAT_M) or 999         -- m to the rail end (within a throat)
-        local atEnd = endM <= 2.2 * HALF_CAR / U_PER_M
-        if atEnd and speed < 4 then                               -- stopped at the stub end -> reverse
+        local endM   = self:TrackEndAhead(THROAT_M) or 999        -- m from the nose to the rail end
+        local margin = 3                                          -- m: pull the nose THIS close to the buffer, so a
+                                                                  -- long train still clears the throat behind it
+        if endM <= margin + 0.6 and speed < 3 then               -- stopped right at the buffer -> reverse
             self:FlipDirection(now)
             tb.phase, tb.holdUntil = "REVERSE", now + 5
             self:ApplyDrive(0, AI.HOLD_BRAKE); self:SetStatus("TURNBACK reverse (stub end)"); return
         end
-        if atEnd then                                             -- close: brake to a stop first
-            self:ApplyDrive(0, AI.SERVICE_BRAKE_MAX)
-            self:SetStatus("TURNBACK runout (stopping at stub end)"); return
-        end
-        local cap = self:StopSpeed(math.max(0, endM - 1.5 * HALF_CAR / U_PER_M))   -- ease down to the buffer
-        self:Drive(math.min(crawl, cap), speed, dt)
+        local cap = self:StopSpeed(math.max(0, endM - margin))    -- ease the nose down to ~margin from the buffer
+        if cap < 1 then self:ApplyDrive(0, AI.SERVICE_BRAKE_MAX)  -- arrived: hold against the buffer until stopped
+        else self:Drive(math.min(crawl, cap), speed, dt) end
         self:SetStatus(string.format("TURNBACK runout %dm to stub end", math.Round(endM)))
         return
     end
@@ -489,13 +487,13 @@ function DRIVER:TurnbackThink(now, dt, speed)
         if now >= (tb.holdUntil or 0) then
             if self:OnReturnTrack() then
                 self:CloseLeg(tb.leg)                           -- straighten the crossover so we run OUT on the return track, not get diverted back across it
-                self.tb = nil; self.returnChainCi = nil         -- direct crossover: done
+                self.tb = nil                                   -- direct crossover: done (RefreshReturnChain re-locks)
             else
                 local leg = self:PlanTurnback()                 -- re-plan the come-back leg
                 if leg then
                     self:CloseLeg(tb.leg)                        -- clear leg-1's switches first
                     tb.leg = leg; tb.phase = "LEG2"; self:OpenLeg(leg)
-                else self:CloseLeg(tb.leg); self.tb = nil; self.returnChainCi = nil end  -- no leg 2: straighten & stop cleanly
+                else self:CloseLeg(tb.leg); self.tb = nil end   -- no leg 2: straighten & stop cleanly
             end
         end
         return
@@ -536,7 +534,7 @@ function DRIVER:TurnbackThink(now, dt, speed)
     -- platform's chain can be far ahead, which left us crawling past every station in LEG2.
     if tb.phase == "LEG2" and self:LegSwitchesCleared(leg) then
         self:CloseLeg(leg)                                       -- straighten the throat behind us
-        self.tb = nil; self.returnChainCi = nil; self:SetStatus("TURNBACK done"); return
+        self.tb = nil; self:SetStatus("TURNBACK done"); return
     end
 
     -- LEG1 fully across the points -> reverse. Leg 1 lands us on the pull track (or, at a

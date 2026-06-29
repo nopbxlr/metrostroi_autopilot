@@ -296,11 +296,21 @@ function DRIVER:OppositeRunningChain(C)
     return best
 end
 
--- The route chain of the RETURN track at the terminus we're at - the opposite running
--- track we continue on after turning back. Locked into returnChainCi at the start of the
--- maneuver (while we're still on our ARRIVAL running track); recomputing it after we cross
--- would point back at the track we just left and ping-pong. Falls back to a live compute
--- from the current chain when nothing is locked yet (e.g. engaged already in the throat).
+-- Keep returnChainCi locked to the OPPOSITE running track as long as we're on a running
+-- track. Call this every tick while NOT in a maneuver: once a turn-back crosses us onto a
+-- tail/pocket (a chain with no platform faces), OppositeRunningChain there returns nil, so
+-- the value freezes at "opposite of the running track we last left" - exactly the return we
+-- want. Without this the tail blanked returnChainCi mid-maneuver and the come-back leg could
+-- not be planned (NS: return-track chain=nil while stuck on chain 5).
+function DRIVER:RefreshReturnChain()
+    local fresh = self:OppositeRunningChain(self:CurrentChain())
+    if fresh then self.returnChainCi = fresh end       -- on a running track: relock; on a tail: keep
+end
+
+-- The route chain of the RETURN track at the terminus we're at - the opposite running track
+-- we continue on after turning back. Held in returnChainCi (kept current by RefreshReturnChain
+-- while on a running track, then frozen once we cross onto a tail). Falls back to a live
+-- compute only if nothing was ever locked.
 function DRIVER:ReturnTrackChain()
     if self.returnChainCi then return self.returnChainCi end
     return self:OppositeRunningChain(self:CurrentChain())

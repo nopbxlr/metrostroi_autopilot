@@ -146,7 +146,7 @@ function AI.CmdTermDebug(ply)
     local tp  = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
     local pos = tp and tp[1]
     local term = pos and drv:TerminusDistance(pos)
-    line("=== !ai term  [build=facemap6] ===")   -- if you don't see this tag, the server is running OLD lua
+    line("=== !ai term  [build=facemap7] ===")   -- if you don't see this tag, the server is running OLD lua
     line(string.format("state=%s  term=%s  turnback phase=%s",
         tostring(drv.state),
         term and (string.format("%.0f m to buffer", term)) or "none (track continues / loop)",

@@ -303,6 +303,9 @@ function DRIVER:Think(now)
     self:UpdateRoutePos(pos)                           -- track position along the route (for ahead-checks)
 
     -- TURN-BACK ENGINE owns the train while a maneuver is in progress (sv_turnback.lua).
+    -- While NOT in one, keep the return-track lock fresh from the running track we're on, so
+    -- it survives once a maneuver crosses us onto a tail (where it can't be recomputed).
+    if not self.tb then self:RefreshReturnChain() end
     if self.tb then self:TurnbackThink(now, dt, speed); return end
 
     -- Build the target speed from every limit. The ARS code IS the AUTHORISED max
