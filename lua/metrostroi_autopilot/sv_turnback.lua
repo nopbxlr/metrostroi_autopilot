@@ -251,20 +251,24 @@ function DRIVER:PlanTurnback()
             local real    = c.landCh ~= nil and c.landCh ~= ourCh
             local viaTail = (not direct) and real and tailReachesReturn(c.landCh) or false
             local kind    = direct and 3 or (viaTail and 2 or (real and 1 or 0))
-            -- TRAILING THROAT: this route would throw a switch ahead that we trail through,
-            -- splitting us under ourselves (NJ5). We cannot cross it now; if it DOES reach the
-            -- return it's the cross we'll make AFTER running out onto the stub and reversing
-            -- (then the throat is facing). Remember that and skip this candidate as a usable leg.
-            if self:LegThrowsTrailing(c.switches) then
-                if kind >= 2 then deferTrailing = true end
-                kind = -1   -- never let it win `best`
-            end
-            if kind >= 0 then
             -- "named" = this MOVE (switch set) entered from OUR chain is a route a dispatcher
             -- would !sopen, even if THIS signal's copy is unnamed. So 'AK3-1' (named on ch4)
             -- is preferred over the unnamed RCAK7 #3 twin (its named copy 'AK4-1' lives on
             -- ch3, a different entry, so it does NOT lend its name to the ch4 move).
             local named   = setNamed[keyOf(ourCh, c.switches)] == true
+            -- TRAILING THROAT - only suspect for an UNNAMED route. A NAMED dispatcher crossover
+            -- (SV 'SV1-4', AK 'AK2-3') is a valid move even though one frog-side switch reads
+            -- aligned with travel; the hdot proxy can't tell a real merge-throat (NJ5) from a
+            -- named crossover's diverge switch, so we trust the mapper's name. Only an UNNAMED
+            -- route that throws a switch we trail through is treated as a throat to run past
+            -- (NJFIX1): skip it as a usable leg; if it reaches the return it's the cross we make
+            -- AFTER running onto the stub and reversing (then the throat is facing).
+            local routeNamed = named or (c.name ~= nil and c.name ~= "")
+            if not routeNamed and self:LegThrowsTrailing(c.switches) then
+                if kind >= 2 then deferTrailing = true end
+                kind = -1   -- never let it win `best`
+            end
+            if kind >= 0 then
             local h       = hopsToReturn(c.nextSig)                 -- display / tie-break only
             local thisNamed = c.name ~= nil and c.name ~= "" and 1 or 0  -- show the named copy
             -- Then prefer the route on the signal we're APPROACHING (nearest ahead) - the one
