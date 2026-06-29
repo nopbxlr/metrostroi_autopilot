@@ -340,9 +340,17 @@ function DRIVER:Think(now)
     -- us when we plan - committing late, after we've rolled past the scissors entry, leaves
     -- only a dead stub reachable. StartTurnback only commits a leg that reaches the return,
     -- so trying eagerly each tick simply commits as soon as a good plan appears.
+    -- ALWAYS require the rail to actually END ahead (a real buffer within range) - never turn
+    -- back on the PALastStation flag alone. That flag is unreliable here (Imagine Line sets it
+    -- on through stations: 701 and 705 are flagged "last" but the line runs on), so trusting it
+    -- turned us back a station early at a depot-junction crossover. We use the PATH-END
+    -- distance (switch-independent: the buffer is 431 m past 706 but 2.9 km past 705 on the
+    -- same path), not the geometric rail-walk (which can't even reach 706's buffer through the
+    -- throat). The flag only WIDENS how far we look (a real terminus' buffer can sit a few
+    -- hundred metres past the platform), and 705's buffer is far enough out to stay excluded.
     if AI.CVars.terminus_rev:GetInt() == 1 and not pf and not self.arsReverseCooldown
        and not self:RecentlyReversedNear(now) and now >= (self.nextTbTry or 0)
-       and (self.servedIsTerminus or self:TrackEndAhead(300)) then
+       and self:TerminusDistance(pos, self.servedIsTerminus and 500 or 400) then
         self.nextTbTry = now + 0.5
         if self:StartTurnback(now) then return end
     end

@@ -344,7 +344,8 @@ end
 -- a short way past it ALONG THE TRACK TANGENT: if no track is there (no junction,
 -- no loop-back), it's a terminus. Because it follows the real track geometry it
 -- never false-fires on curves the way a straight world-space probe did.
-function DRIVER:TerminusDistance(pos)
+function DRIVER:TerminusDistance(pos, maxDist)
+    maxDist = maxDist or 400
     -- self.termWhy records WHICH branch decided the outcome, so !ai term can show
     -- why a real dead end was (or wasn't) seen instead of us having to guess.
     if not (pos and pos.path and pos.x and pos.node1 and isvector(pos.node1.dir)) then
@@ -360,8 +361,8 @@ function DRIVER:TerminusDistance(pos)
     local dist_m = (endNode.x - pos.x) * sgn               -- metres to the path end ahead
     if dist_m <= 0 then
         self.termWhy = string.format("path end behind us (%.0fm, sgn=%d)", dist_m, sgn); return nil end
-    if dist_m > 400 then
-        self.termWhy = string.format("path end too far (%.0fm > 400)", dist_m); return nil end
+    if dist_m > maxDist then
+        self.termWhy = string.format("path end too far (%.0fm > %.0f)", dist_m, maxDist); return nil end
 
     local dir = endNode.dir * sgn
     for _, d in ipairs({ 4, 9, 16 }) do                     -- probe just past the end
