@@ -146,7 +146,7 @@ function AI.CmdTermDebug(ply)
     local tp  = Metrostroi.TrainPositions and Metrostroi.TrainPositions[head]
     local pos = tp and tp[1]
     local term = pos and drv:TerminusDistance(pos)
-    line("=== !ai term  [build=facemap3] ===")   -- if you don't see this tag, the server is running OLD lua
+    line("=== !ai term  [build=facemap4] ===")   -- if you don't see this tag, the server is running OLD lua
     line(string.format("state=%s  term=%s  turnback phase=%s",
         tostring(drv.state),
         term and (string.format("%.0f m to buffer", term)) or "none (track continues / loop)",
@@ -274,8 +274,10 @@ function AI.CmdTermDebug(ply)
             local lat = (rel - dir * fd):Length()
             if math.abs(fd) < 450 * AI.U_PER_M and lat < 1000 then
                 n = n + 1
-                line(string.format("  switch %s  fwd=%+.0fm  lat=%.0fu  alt=%s",
-                    tostring(sw:GetNW2String("ID", "?")), fd / AI.U_PER_M, lat, tostring(sw.AlternateTrack)))
+                local trailing, dot = drv:SwitchTrailing(sw)
+                line(string.format("  switch %s  fwd=%+.0fm  lat=%.0fu  alt=%s  %s(dot=%s)",
+                    tostring(sw:GetNW2String("ID", "?")), fd / AI.U_PER_M, lat, tostring(sw.AlternateTrack),
+                    trailing and "TRAILING" or "facing", dot and string.format("%.2f", dot) or "?"))
                 if n >= 10 then break end
             end
         end

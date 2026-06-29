@@ -236,6 +236,40 @@ function DRIVER:RecentlyReversedNear(now)
     return false
 end
 
+-- Classify a switch as TRAILING vs FACING from our current approach. A switch's diverging
+-- branch joins its host track node (Metrostroi snaps each branch path's endpoint onto the
+-- host at load: node.branches = {{join_x, branchNode}, ...}). If that branch leads BACKWARD
+-- relative to our travel, the two legs MERGE in front of us and we're rolling OUT of the merge
+-- = TRAILING: the switch must stay set to the leg we're physically on, and throwing it to the
+-- other leg splits/derails (the NJ5 throat). If the branch leads forward we're at the points
+-- and can diverge = FACING (a normal turn-back crossover). Returns trailing(bool), dot(number
+-- or nil). Conservative: unknown geometry -> not trailing, so we never reject a real crossover.
+function DRIVER:SwitchTrailing(sw)
+    if not (IsValid(sw) and isvector(self.travelDir)) then return false, nil end
+    local tp = sw.TrackPosition
+    if not (istable(tp) and istable(tp.node1) and istable(tp.node1.branches)) then return false, nil end
+    local swPos = sw:GetPos()
+    local most  -- most-backward branch lead dot
+    for _, b in ipairs(tp.node1.branches) do
+        local bn = istable(b) and b[2]
+        local ref
+        if istable(bn) then
+            ref = (istable(bn.next) and isvector(bn.next.pos) and bn.next.pos)
+               or (istable(bn.prev) and isvector(bn.prev.pos) and bn.prev.pos)
+               or (isvector(bn.pos) and bn.pos) or nil
+        end
+        if ref then
+            local d = ref - swPos
+            if d:LengthSqr() > 1 then
+                local dot = self.travelDir:Dot(d:GetNormalized())
+                if not most or dot < most then most = dot end
+            end
+        end
+    end
+    if not most then return false, nil end
+    return most < -0.3, most
+end
+
 -- The chain our train's head is currently on.
 function DRIVER:CurrentChain()
     if not (AI.ChainPos and Metrostroi.TrainPositions) then return nil end
