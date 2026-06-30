@@ -163,6 +163,17 @@ All persist (`FCVAR_ARCHIVE`) and are live-tunable.
 | `metrostroi_ai_rate` | `15` | Control-loop frequency (Hz). |
 | `metrostroi_ai_debug` | `0` | On-screen debug overlay for AI trains. |
 
+**Client-side render optimisation** (per-client, persist; see *Performance*). These
+make **AI** trains cheaper to draw — your own and other players' trains are untouched:
+
+| ConVar | Default | Meaning |
+|---|---|---|
+| `metrostroi_ai_lite_render` | `1` | Master on/off for cheaper AI-train rendering. |
+| `metrostroi_ai_no_projlights` | `1` | Drop AI trains' projected-texture headlights + dynamic lights (keep the cheap glow, so they still look lit). |
+| `metrostroi_ai_no_shadows` | `1` | Disable AI-train shadows. |
+| `metrostroi_ai_strip_interior` | `1` | Distance-cull AI deep interior (doors / body / exterior always stay; cab always hidden). |
+| `metrostroi_ai_interior_mult` | `1.0` | AI interior draw distance as a multiple of normal (`metrostroi_renderdistance` × the prop's `hide`); lower = cull sooner for FPS. |
+
 ## Tested maps
 
 Driving, signals, platform stops, regulation and **terminus turn-backs** have been
@@ -186,8 +197,21 @@ driven directly — **not** the lightweight/simplified legacy AI ("phantom") tra
 Metrostroi provides itself. Each autopilot train therefore costs about as much as a
 real player-driven train (physics, networking, rendering on every client), so
 **running several can put significant strain on both the server and connected
-clients.** Keep the number of simultaneous AI trains modest for your hardware and
-keep an eye on the server tickrate / client FPS.
+clients.**
+
+**Running several at once? Strongly recommended:** use a maintained Turbostroi build —
+**[gm_turbostroi](https://github.com/kosmik641/gm_turbostroi)** is a more recent,
+actively-maintained fork with better optimisation (drop it in `garrysmod/lua/bin/`).
+
+**Client side, this addon already self-optimises AI trains** (your own / other
+players' trains are untouched): it drops their expensive projected-texture headlights
+— keeping the cheap glow so they still look lit — disables their shadows, and
+distance-culls their deep interior. On by default; tune or disable via
+`metrostroi_ai_lite_render`, `metrostroi_ai_no_projlights`, `metrostroi_ai_no_shadows`,
+`metrostroi_ai_strip_interior` and `metrostroi_ai_interior_mult` (all client-side).
+
+Even with both, keep an eye on the server tick rate / client FPS and keep the train
+count sensible for your hardware.
 
 ## Notes / limitations
 
