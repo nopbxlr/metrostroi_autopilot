@@ -34,7 +34,8 @@ and speed.
   models still *drive*, but their lights/doors won't work without a profile.
 - **These are full-physics trains** (not lightweight legacy AI) — each costs about
   as much as a real player train, so **don't spawn too many** or you'll strain the
-  server and clients.
+  server and clients. Running a lot? A maintained, better-optimised Turbostroi fork
+  ([gm_turbostroi](https://github.com/kosmik641/gm_turbostroi)) helps — see *Performance*.
 - **Tested on the *main line only*** of `gm_metro_surfacemetro_w`,
   `gm_metro_jar_imagine_line_v4`, and `gm_metro_nekrasovskaya_line_v6`.
 - **Something misbehaving?** `!ai term` (also `!ai reg` / `!ai ars`) prints a
